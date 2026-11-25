@@ -121,10 +121,16 @@ setup_users() {
     password=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
     generated=1
   fi
-  if ! id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1; then
-    useradd --prefix "$ACCOUNTS_ROOT" --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
-      --groups lpadmin "$CUPS_ADMIN_USER"
+  # One line, no control characters: chpasswd reads "user:password" lines, so a newline would
+  # start another entry (possibly for another account).
+  [[ $password != *[[:cntrl:]]* ]] || die "the admin password must be a single line without control characters"
+  # The account files are fresh from the image at every start, so an existing name is a built-in
+  # system account (nobody, www-data, ...): it would get the password but not admin rights.
+  if id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1; then
+    die "CUPS_ADMIN_USER '$CUPS_ADMIN_USER' is an existing system account; choose another name"
   fi
+  useradd --prefix "$ACCOUNTS_ROOT" --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+    --groups lpadmin "$CUPS_ADMIN_USER"
   printf '%s:%s\n' "$CUPS_ADMIN_USER" "$password" | chpasswd --prefix "$ACCOUNTS_ROOT" --crypt-method SHA512
   if [[ -n $generated ]]; then
     log "No CUPS_ADMIN_PASSWORD set; generated a one-off admin password for this start:"

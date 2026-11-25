@@ -30,7 +30,7 @@ cleanup() {
     echo; echo "---- server logs ----"; docker logs "$SERVER" 2>&1 | tail -60
   fi
   docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" >/dev/null 2>&1 || true
-  docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" >/dev/null 2>&1 || true
+  docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" "$VOL-spool" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   rm -f "${SECRET_FILE:-}" "${SECRET_FILE:-}.cfg"
 }
@@ -75,6 +75,8 @@ check "CUPS logs reach docker logs" bash -c "docker logs '$SERVER' 2>&1 | grep -
 check "avahi publishes the service" bash -c "docker logs '$SERVER' 2>&1 | grep -q 'successfully established'"
 check "avahi service file is valid XML with escaped name" \
   bash -c "svc=\$(docker exec '$SERVER' cat /etc/avahi/services/vprint.service); grep -qF '>Smoke &amp; &lt;Test&gt; Printer<' <<<\"\$svc\" && grep -qF 'note=Desk &quot;B&quot;<' <<<\"\$svc\" && ! grep -q '<lt;' <<<\"\$svc\""
+check "Avahi does not expand wildcards such as %h in the printer name" \
+  bash -c "! docker exec '$SERVER' grep -q replace-wildcards /etc/avahi/services/vprint.service"
 check "PPD default paper size follows PAPER_SIZE" \
   bash -c "docker exec '$SERVER' grep -q '^\*DefaultPageSize: Letter' /etc/cups/ppd/Paperless_Printer.ppd"
 check "printer UUID is derived (not the old static one)" \
@@ -180,6 +182,8 @@ invalid_config "regex-like PAPER_SIZE" "PAPER_SIZE 'A.' is not supported" -e PAP
 invalid_config "empty TZ" "is not a known time zone" -e TZ=
 invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/
 invalid_config "OUTPUT_DIR escaping via .." "OUTPUT_DIR must not be" -e OUTPUT_DIR=/mnt/../etc/x
+invalid_config "an existing system account as admin" "is an existing system account" -e CUPS_ADMIN_USER=nobody
+invalid_config "a multi-line admin password" "must be a single line" -e CUPS_ADMIN_PASSWORD="$(printf 'one\nroot:two')"
 invalid_config "ADVERTISED_HOST with a space" "is not a host name or IP" -e ADVERTISED_HOST="bad host"
 # Run from /etc so a glob like '*.conf' would match files if the list were word-split unquoted.
 docker run --rm -w /etc -e CUPS_ADMIN_PASSWORD=x -e ADVERTISED_HOST=fd00::12 \
@@ -204,29 +208,39 @@ check "existing populated output dir keeps its owner" test "$(docker exec "$SERV
 docker rm -f "$SERVER-stuck" >/dev/null
 
 # A read-only output volume: jobs can't be published, so health must go bad (not silently pile up).
+# Run like the compose examples: read-only root, tmpfs /run and /tmp, /var/spool on a volume.
 docker volume create "$VOL-ro" >/dev/null
+docker volume create "$VOL-spool" >/dev/null
 docker run -d --name "$SERVER-stuck" -e CUPS_ADMIN_PASSWORD=x -e VPRINT_STUCK_SECONDS=3 \
+  --read-only --tmpfs /run --tmpfs /tmp -v "$VOL-spool:/var/spool" \
   -v "$VOL-ro:/mnt/output:ro" "$IMAGE" >/dev/null
 check "container with read-only output healthy at start" wait_healthy "$SERVER-stuck"
-printf 'stuck\n' | docker exec -i "$SERVER-stuck" lp -t "Stuck Job" >/dev/null
+printf 'first\n' | docker exec -i "$SERVER-stuck" lp -t "Stuck Job" >/dev/null
 sleep 8
 check "unwritable output dir makes the healthcheck fail" bash -c \
-  "! docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q healthy; docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'cannot be written'"
+  "! docker exec '$SERVER-stuck' vprint-healthcheck >/dev/null 2>&1 && docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'cannot be written'"
 check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&1 | grep -q 'cannot write to /mnt/output'"
-# A still-staged file must keep the title it was printed with even when cupsd no longer has the
-# job (history purged): job ids then restart, and a lookup would find whichever new job reuses
-# the id. Simulate the purge by dropping the job history before a restart.
-docker exec "$SERVER-stuck" sh -c 'rm -f /var/spool/cups/c* /var/spool/cups/d*'
-docker restart -t 2 "$SERVER-stuck" >/dev/null
+# Restart with cupsd's job history gone (as if purged): job ids start again at 1, so a new job
+# with the same title gets the same cups-pdf file name. The queued PDF must survive the restart,
+# keep its title, and not be overwritten by the new job.
+# (Deleted while stopped: cupsd writes its job history back on shutdown.)
+docker stop -t 5 "$SERVER-stuck" >/dev/null
+docker run --rm -v "$VOL-spool:/var/spool" --entrypoint '' "$IMAGE" sh -c 'rm -f /var/spool/cups/c* /var/spool/cups/d*'
+docker start "$SERVER-stuck" >/dev/null
 for _ in $(seq 1 30); do
   (($(docker logs "$SERVER-stuck" 2>&1 | grep -c 'vprint-mover: watching') >= 2)) && break
   sleep 1
 done
-printf 'other\n' | docker exec -i "$SERVER-stuck" lp -t "Other Job" >/dev/null
-sleep 4
-# Logged once before the restart and once after: the same name both times.
-check "a staged file keeps its title across a restart" test \
-  "$(docker logs "$SERVER-stuck" 2>&1 | grep -c 'cannot write.*: Stuck Job-job_1.pdf$')" = 2
+printf 'second\n' | docker exec -i "$SERVER-stuck" lp -t "Stuck Job" >/dev/null
+for _ in $(seq 1 20); do
+  (($(docker exec "$SERVER-stuck" find /var/spool/vprint -path '*/.vprint-claim.*/*' -type f | wc -l) >= 2)) && break
+  sleep 1
+done
+claimed() { docker exec "$SERVER-stuck" find /var/spool/vprint -path '*/.vprint-claim.*/*' -type f "$@"; }
+check "queued PDF survives a restart and keeps its title" \
+  test "$(claimed -printf '%f\n' | grep -cx 'Stuck Job-job_1.pdf')" = 2
+check "a reused job id does not overwrite the queued PDF" \
+  test "$(claimed -exec md5sum {} + | cut -c1-32 | sort -u | wc -l | tr -d ' ')" = 2
 
 docker rm -f "$SERVER-stuck" >/dev/null
 
@@ -272,12 +286,13 @@ check "OUTPUT_LABEL=0 names by title and de-duplicates clashes" \
   test "$(docker exec "$SERVER-sup" ls /mnt/output | LC_ALL=C sort | tr '\n' '|')" = "Dir Clash-1.pdf|Dir Clash.pdf|Same Name-1.pdf|Same Name.pdf|"
 printf 'dot\n' | docker exec -i "$SERVER-sup" lp -t "example.com" >/dev/null
 printf 'ext\n' | docker exec -i "$SERVER-sup" lp -t "Quarterly Report.DOCX" >/dev/null
+printf 'trim\n' | docker exec -i "$SERVER-sup" lp -t "Notes .txt" >/dev/null
 for _ in $(seq 1 30); do
-  docker exec "$SERVER-sup" test -e /mnt/output/example.com.pdf -a -e "/mnt/output/Quarterly Report.pdf" && break
+  docker exec "$SERVER-sup" test -e /mnt/output/example.com.pdf -a -e "/mnt/output/Quarterly Report.pdf" -a -e /mnt/output/Notes.pdf && break
   sleep 1
 done
-check "only known document extensions are dropped from titles" \
-  docker exec "$SERVER-sup" test -e /mnt/output/example.com.pdf -a -e "/mnt/output/Quarterly Report.pdf"
+check "only known document extensions are dropped from titles, without a trailing space" \
+  docker exec "$SERVER-sup" test -e /mnt/output/example.com.pdf -a -e "/mnt/output/Quarterly Report.pdf" -a -e /mnt/output/Notes.pdf
 check "a same-named directory is treated as a clash" test -n "$(docker exec "$SERVER-sup" find "/mnt/output/Dir Clash-1.pdf" -type f)"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3

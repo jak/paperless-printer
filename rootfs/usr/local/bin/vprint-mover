@@ -1,10 +1,13 @@
 #!/bin/bash
 # Publish finished PDFs from the cups-pdf staging directory into OUTPUT_DIR.
 #
-# Each file is copied into OUTPUT_DIR under a hidden temporary name with the configured
-# owner and mode, then renamed into place. rename(2) is atomic within one directory, so a
-# watcher (e.g. paperless-ngx) only ever sees complete files. Files that cannot be
-# published (e.g. read-only volume) stay in staging and are retried.
+# As soon as cups-pdf finishes a file, it is "claimed": moved into its own directory in staging
+# under its final output name. That fixes its title while cupsd still knows the job, and frees
+# cups-pdf's name ("<title>-job_<id>.pdf") so a later job reusing the id can't overwrite it.
+# Claimed files are copied into OUTPUT_DIR under a unique hidden temporary name with the
+# configured owner and mode, then renamed into place. rename(2) is atomic within one directory,
+# so a watcher (e.g. paperless-ngx) only ever sees complete files. Files that cannot be
+# published (e.g. read-only or full volume) stay claimed in staging and are retried.
 set -uo pipefail
 shopt -s nullglob dotglob
 
@@ -72,6 +75,8 @@ sanitize() {
   shopt -u nocasematch
   # Truncate by bytes, then drop any multi-byte character cut in half.
   s=$(printf '%s' "$s" | head -c 100 | iconv -f UTF-8 -t UTF-8 -c)
+  # Dropping the extension or truncating can expose a trailing space or dot again.
+  s=$(sed -E 's/[ .]+$//' <<<"$s")
   printf '%s' "${s:-untitled}"
 }
 
@@ -94,23 +99,23 @@ output_name() {
   esac
 }
 
-# name_for SRC -> the output name, worked out once when the file is first seen and cached
-# beside it. Job ids restart with the container, so a lookup on a later retry could pick up
-# a different job's title.
-name_for() {
-  local src=$1 name
-  if [[ -s $src.name ]]; then
-    name=$(<"$src.name")
-  else
-    name=$(output_name "${src##*/}")
-    printf '%s' "$name" >"$src.name" || true
+readonly CLAIM_PREFIX=.vprint-claim.
+
+# claim SRC: move a finished cups-pdf file into a new claim directory under its output name.
+claim() {
+  local src=$1 name dir
+  name=$(output_name "${src##*/}")
+  dir=$(mktemp -d "$VPRINT_STAGING_DIR/${CLAIM_PREFIX}XXXXXXXX") || return 1
+  if ! mv -T "$src" "$dir/$name"; then
+    rmdir "$dir"
+    return 1
   fi
-  printf '%s' "$name"
+  rm -f "$src.done"
 }
 
+# publish FILE: copy a claimed file into OUTPUT_DIR under its name (de-duplicated).
 publish() {
-  local src=$1 name tmp target
-  name=$(name_for "$src")
+  local src=$1 name=${1##*/} tmp target
   # A unique temporary file per publish (mktemp uses O_EXCL), so publishers sharing an output
   # directory can never overwrite each other's copy before it is renamed into place.
   if ! tmp=$(mktemp --suffix=.vprint-partial "$OUTPUT_DIR/.vprint-XXXXXXXXXX" 2>/dev/null) ||
@@ -127,7 +132,8 @@ publish() {
     log "could not find a free file name for $name (will keep retrying)"
     return 1
   fi
-  rm -f "$src" "$src.done" "$src.name"
+  rm -f "$src"
+  rmdir "${src%/*}" 2>/dev/null || true
   unset 'warned[$src]'
   log "saved ${target}"
 }
@@ -142,6 +148,8 @@ sweep_partials() {
 
 trap 'exit 0' TERM INT
 sweep_partials
+# Empty claim directories are left by a crash between publishing and clean-up.
+find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name "${CLAIM_PREFIX}*" -empty -delete 2>/dev/null || true
 log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
 while :; do
   ((SECONDS < next_sweep)) || sweep_partials
@@ -152,15 +160,18 @@ while :; do
     [[ $name =~ -job_([0-9]+)\.pdf$ ]] && id=${BASH_REMATCH[1]}
     # Titles and Ghostscript output are untrusted: sanitize so they can't forge log lines.
     log "ERROR: PDF conversion failed for job ${id:-?} \"$(sanitize "$(job_title "${id:-0}")")\"; no file was saved: $(tr -s '[:cntrl:]' ' ' <"$failed")"
-    rm -f "$failed" "${failed%.failed}" "${failed%.failed}.done" "${failed%.failed}.name"
+    rm -f "$failed" "${failed%.failed}" "${failed%.failed}.done"
   done
   for marker in "$VPRINT_STAGING_DIR"/*.done; do
     src=${marker%.done}
     if [[ -f $src ]]; then
-      publish "$src" || true
+      claim "$src" || log "cannot claim ${src##*/} in staging (will keep retrying)"
     else
-      rm -f "$marker" "$src.name"
+      rm -f "$marker"
     fi
+  done
+  for claimed in "$VPRINT_STAGING_DIR/$CLAIM_PREFIX"*/*; do
+    publish "$claimed" || true
   done
   sleep "$POLL_SECONDS" &
   wait $! || true

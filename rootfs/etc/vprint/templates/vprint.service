@@ -2,7 +2,7 @@
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <!-- Rendered by vprint-entrypoint at container start. AirPrint/IPP Everywhere advertisement. -->
 <service-group>
-  <name replace-wildcards="yes">${PRINTER_NAME_XML}</name>
+  <name>${PRINTER_NAME_XML}</name>
   <service>
     <type>_ipp._tcp</type>
     <subtype>_universal._sub._ipp._tcp</subtype>
