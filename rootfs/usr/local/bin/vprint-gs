@@ -35,12 +35,13 @@ fi
 status=$?
 [ -z "$keeper" ] || kill "$keeper" 2>/dev/null
 if [ "$status" -ne 0 ] && [ -n "$out" ]; then
-  # Written under a temporary name and renamed, so vprint-mover never reads it half-written.
+  # The partial PDF goes first, so a genuine report never has its PDF still present. The report
+  # is written under a temporary name and renamed, so vprint-mover never reads it half-written.
+  rm -f "$out"
   {
     echo "exit status $status"
     if [ -n "$err" ]; then tail -n 5 "$err"; else echo "(no details: could not create a temporary file)"; fi
   } >"$out.failed.tmp" 2>/dev/null && mv -f "$out.failed.tmp" "$out.failed"
-  rm -f "$out"
 fi
 if [ -n "$err" ]; then
   cat "$err" >&2

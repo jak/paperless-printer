@@ -106,26 +106,52 @@ place() {
   printf '%s' "$target"
 }
 
-# job_title ID -> the job-name cupsd recorded for the job (empty if unknown/untitled).
-# Fails if cupsd can't be asked (not up yet, or busy past the retries), so the caller can try
-# again later instead of naming the file "untitled" for good.
-# ipptool -l prints a header, a ruler and the value with '"' and '\' backslash-escaped.
-job_title() {
-  local out rc=1 attempt title
+# ipp_job ID TESTFILE -> ipptool's JSON output for the job (retried on timeout). JSON, not -l:
+# with -l, ipptool refuses to print values that fail its own checks (a job-name over 255 bytes
+# or with a newline), though cupsd stored and returns them.
+ipp_job() {
+  local out rc=1 attempt
   for attempt in 1 2 3; do
-    out=$(timeout 5 ipptool -l "ipp://localhost/jobs/$1" /etc/vprint/get-job-name.test 2>/dev/null)
+    out=$(timeout 5 ipptool -j "ipp://localhost/jobs/$1" "/etc/vprint/$2" 2>/dev/null)
     rc=$?
     ((rc == 124)) || break
     ((attempt < 3)) && sleep 1
   done
-  if ((rc != 0)); then
-    # ipptool exits 1 both for "no such job" and "can't connect"; tell them apart.
-    ((rc != 124)) && scheduler_up && return 0
+  printf '%s' "$out"
+  ((rc != 124))
+}
+
+# json_attr NAME JSON -> the first string value of NAME, unescaped. (After a failed check,
+# ipptool appends its error text, so only the first, well-formed occurrence is used.)
+json_attr() {
+  local line v
+  line=$(grep -m1 -E "^[[:space:]]*\"$1\": \"" <<<"$2") || return 1
+  [[ $line =~ \"$1\":\ \"(.*)\",?$ ]] || return 1
+  v=${BASH_REMATCH[1]}
+  v=${v//\\\\/$'\x01'} # protect escaped backslashes
+  v=${v//\\\"/\"}
+  v=${v//\\\//\/}
+  v=${v//\\[nrtbf]/ }
+  printf '%s' "${v//$'\x01'/\\}"
+}
+
+# job_missing JSON: cupsd explicitly said the job doesn't exist (not just "no answer").
+job_missing() { grep -q '"status-message": "Job #[0-9]* does not exist' <<<"$1"; }
+
+# job_title ID -> the job-name cupsd recorded for the job (empty if unknown/untitled).
+# Fails if cupsd can't be asked (not up yet, busy past the retries, or an error), so the
+# caller can try again later instead of naming the file "untitled" for good.
+job_title() {
+  local out title
+  out=$(ipp_job "$1" get-job-name.test) || return 1
+  if title=$(json_attr job-name "$out"); then
+    [[ $title == "(stdin)" ]] && title=
+    printf '%s' "$title"
+  elif job_missing "$out"; then
+    return 0 # no such job (any more): untitled
+  else
     return 1
   fi
-  title=$(sed -n '3{s/[[:space:]]*$//; s/\\\(.\)/\1/g; p}' <<<"$out")
-  [[ $title == "(stdin)" ]] && title=
-  printf '%s' "$title"
 }
 
 readonly DOC_EXTENSIONS='pdf|ps|txt|text|md|rtf|csv|tsv|html?|xml|json|eml|msg|docx?|dotx?|xlsx?|pptx?|odt|ods|odp|odg|pages|numbers|key|png|jpe?g|gif|bmp|tiff?|heic|heif|webp|svg'
@@ -234,26 +260,30 @@ publish() {
 }
 
 # job_state STAGED_FILE -> completed | active (pending, held or processing) | gone (aborted,
-# cancelled, no longer known, or no job id in the name) | unknown (cupsd can't say right now).
+# cancelled, no such job, or no job id in the name) | unknown (cupsd can't say right now).
+# Only an explicit answer counts: a busy or failing cupsd must not get a finished PDF deleted.
 job_state() {
-  local id out rc
+  local id out state
   if ! [[ ${1##*/} =~ -job_([0-9]+)\.pdf$ ]]; then
     echo gone
     return
   fi
   id=${BASH_REMATCH[1]}
-  out=$(timeout 5 ipptool -l "ipp://localhost/jobs/$id" /etc/vprint/get-job-state.test 2>/dev/null)
-  rc=$?
-  if ((rc != 0)); then
-    # ipptool exits 1 both for "no such job" and "can't connect".
-    ((rc != 124)) && scheduler_up && echo gone || echo unknown
-    return
+  if ! out=$(ipp_job "$id" get-job-state.test); then
+    echo unknown
+  elif state=$(grep -m1 -oE '"job-state": [0-9]+' <<<"$out"); then
+    # RFC 8011 job-state: 3 pending, 4 held, 5 processing, 6 stopped, 7 canceled, 8 aborted,
+    # 9 completed.
+    case ${state##* } in
+      9) echo completed ;;
+      3 | 4 | 5 | 6) echo active ;;
+      *) echo gone ;;
+    esac
+  elif job_missing "$out"; then
+    echo gone
+  else
+    echo unknown
   fi
-  case $(sed -n '3{s/[[:space:]]*$//; p}' <<<"$out") in
-    completed) echo completed ;;
-    pending* | processing*) echo active ;;
-    *) echo gone ;;
-  esac
 }
 
 # Periodic clean-up of leftovers from crashes:
@@ -320,8 +350,9 @@ while :; do
     report=$PRIVATE/report
     rm -rf "$report"
     mv -T "$failed" "$report" 2>/dev/null || continue
-    # vprint-gs removes the PDF before reporting, so a PDF still there must at least share the
-    # report's owner: another user's report must not make root delete it.
+    # vprint-gs removes the PDF before writing its report, so a PDF still there means the report
+    # is not genuine; at least it must share the PDF's owner, so another user's report can't
+    # make root delete it.
     pdf=${failed%.failed}
     if [[ ! -f $report || -L $report ]] || { [[ -e $pdf || -L $pdf ]] && ! same_owner "$report" "$pdf"; }; then
       log "ignoring a failure report not written for this job: $(sanitize "${failed##*/}")"
@@ -379,6 +410,10 @@ while :; do
     fi
     : >"$HEARTBEAT"
     stop_if_asked
+  done
+  # Forget back-off state for files that are gone (published, or removed by hand).
+  for f in "${!retry_at[@]}"; do
+    [[ -e $f ]] || unset 'retry_at[$f]' 'retry_delay[$f]' 'last_reason[$f]'
   done
   warned=()
   for f in "${!failing[@]}"; do warned[$f]=1; done

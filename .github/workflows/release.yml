@@ -195,6 +195,33 @@ jobs:
           docker buildx imagetools create "${args[@]}" "$SOURCE"
           echo "Published $SOURCE as: $tags" | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # An untested candidate must not linger in the registry when a run fails before promotion.
+  # Only a version whose *only* tag is this run's candidate is deleted, never one that also
+  # carries a release tag. Best effort: a failure here doesn't fail the run.
+  cleanup-candidate:
+    needs: [build-candidate, promote]
+    if: always() && needs.build-candidate.result == 'success' && needs.promote.result != 'success'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      packages: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: ${{ github.event.repository.name }}
+          TAG: candidate-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          kind=users
+          [[ $(gh api "users/$OWNER" --jq .type) == Organization ]] && kind=orgs
+          base="$kind/$OWNER/packages/container/$PACKAGE/versions"
+          ids=$(gh api --paginate "$base" --jq ".[] | select(.metadata.container.tags == [\"$TAG\"]) | .id")
+          for id in $ids; do
+            gh api -X DELETE "$base/$id"
+            echo "Deleted untested candidate $TAG (version $id)" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
   github-release:
     needs: [resolve, promote]
     if: github.event_name == 'push'

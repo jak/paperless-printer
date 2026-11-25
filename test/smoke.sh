@@ -382,6 +382,17 @@ done
 check "after 99 clashes a time-based suffix is used" \
   test -n "$(docker exec "$SERVER-sup" find /mnt/output -regex '.*/Busy-[0-9]+-[0-9]+-[0-9]+\.pdf')"
 docker exec "$SERVER-sup" sh -c 'rm -f /mnt/output/Busy*.pdf'
+# Titles cupsd accepts but ipptool's own checks reject (over 255 bytes, or with a newline)
+# must keep their title rather than become "untitled".
+printf 'long\n' | docker exec -i "$SERVER-sup" lp -t "$(printf 'Long%.0s' $(seq 1 70))" >/dev/null
+printf 'nl\n' | docker exec -i "$SERVER-sup" lp -t "$(printf 'Two\nLines')" >/dev/null
+for _ in $(seq 1 30); do
+  docker exec "$SERVER-sup" test -e "/mnt/output/Two Lines.pdf" && break
+  sleep 1
+done
+check "titles over 255 bytes or with a newline keep their title" bash -c \
+  "docker exec '$SERVER-sup' test -e '/mnt/output/Two Lines.pdf' && docker exec '$SERVER-sup' sh -c 'ls /mnt/output | grep -q ^LongLongLong' && ! docker exec '$SERVER-sup' sh -c 'ls /mnt/output | grep -q ^untitled'"
+docker exec "$SERVER-sup" sh -c 'rm -f /mnt/output/Long*.pdf "/mnt/output/Two Lines.pdf"'
 check "a same-named directory is treated as a clash" test -n "$(docker exec "$SERVER-sup" find "/mnt/output/Dir Clash-1.pdf" -type f)"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3

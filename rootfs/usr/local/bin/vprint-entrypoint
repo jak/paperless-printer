@@ -324,6 +324,9 @@ main() {
 
   local status=0
   wait -n "${pids[@]}" || status=$?
+  # From here on this is a failure exit: a TERM arriving during clean-up must not turn it
+  # into shutdown's clean "exit 0" (restart policies like on-failure rely on the status).
+  trap - TERM INT
   log "a supervised process exited (status $status); shutting down so the container can be restarted"
   kill -TERM "${pids[@]}" 2>/dev/null || true
   wait || true
