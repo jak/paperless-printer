@@ -19,6 +19,7 @@ shell_scripts=(
   rootfs/usr/local/bin/vprint-gs
   test/smoke.sh
   test/lint.sh
+  .github/scripts/release-tags.sh
 )
 
 run "hadolint Dockerfile" docker run --rm -i "$HADOLINT_IMAGE" hadolint - <Dockerfile
