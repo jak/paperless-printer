@@ -1,22 +1,37 @@
-version: "3.4"
+# virtual-cups-printer: a network printer that saves every job as a PDF.
+#
+#   1. echo 'choose-a-password' > admin_password.txt
+#   2. docker compose up -d
+#   3. Print to "Paperless Printer" from any device on the LAN. PDFs land in ./output.
+#
+# Host networking is the simplest way for AirPrint/Bonjour discovery to work. For several
+# printers on one host, or a dedicated IP, see examples/macvlan. To feed paperless-ngx,
+# see examples/paperless.
 services:
-  printserver:
-    build: .
+  printer:
+    image: ghcr.io/jak/virtual-cups-printer:2
+    # build: .            # build from source instead of pulling
     restart: unless-stopped
-    networks:
-      - cups-vlan
+    network_mode: host    # needed for mDNS discovery; the web UI is on https://<host>:631
+    environment:
+      PRINTER_NAME: Paperless Printer
+      PRINTER_LOCATION: Office
+      PAPER_SIZE: A4                  # or Letter
+      TZ: Europe/London
+      PUID: 1000                      # owner of the PDFs (match the consumer, e.g. paperless)
+      PGID: 1000
+      UMASK: "0022"                   # 0644 files
+      CUPS_ADMIN_PASSWORD_FILE: /run/secrets/cups_admin_password
+    secrets:
+      - cups_admin_password
     volumes:
-      - /tmp/output:/mnt/output
-    ports:
-      - 631:631 # Expose HTTP server
+      - ./output:/mnt/output
+    # Least privilege: these capabilities are all CUPS, cups-pdf and Avahi need.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL, NET_BIND_SERVICE, SYS_CHROOT]
+    security_opt:
+      - no-new-privileges:true
 
-networks:
-  cups-vlan:
-    driver: macvlan
-    driver_opts:
-      parent: eth0 # Update as necessary
-    ipam:
-      config:
-        - subnet: "192.168.0.0/24"
-          ip_range: "192.168.0.12/32" #static IP
-          gateway: "192.168.0.1"
+secrets:
+  cups_admin_password:
+    file: ./admin_password.txt
