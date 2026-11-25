@@ -149,18 +149,32 @@ render_config() {
   VPRINT_NOW=$(date +%s)
   VPRINT_ADMINURL_RECORD=
   if [[ -n $ADVERTISED_HOST ]]; then
-    VPRINT_ADMINURL_RECORD=$'\n'"    <txt-record>adminurl=https://$(xml_escape "$ADVERTISED_HOST"):631/printers/${PRINTER_ID}</txt-record>"
+    local host=$ADVERTISED_HOST record
+    if [[ $host =~ ^[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*$ ]]; then
+      host="[$host]" # IPv6 literal: brackets are required in a URL
+    elif ! [[ $host =~ ^\[[0-9A-Fa-f:.]+\]$ || $host =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+      die "ADVERTISED_HOST '$ADVERTISED_HOST' is not a host name or IP address"
+    fi
+    record="adminurl=https://$host:631/printers/${PRINTER_ID}"
+    # DNS-SD TXT records are limited to 255 bytes each.
+    ((${#record} <= 255)) || die "ADVERTISED_HOST is too long for the Bonjour admin URL"
+    VPRINT_ADMINURL_RECORD=$'\n'"    <txt-record>${record}</txt-record>"
   fi
   CUPS_WEB_INTERFACE=$(is_true "$CUPS_WEB_INTERFACE" && echo Yes || echo No)
-  local addr
+  # Split with read -a, not an unquoted expansion, so '*' or '*.lan' is never globbed against
+  # file names in the working directory.
+  local addr addrs
   CUPS_ALLOW_DIRECTIVES=
-  for addr in $CUPS_ALLOW_FROM; do
-    [[ $addr =~ ^[A-Za-z0-9@.:/*_-]+$ ]] || die "CUPS_ALLOW_FROM entry '$addr' is not a CUPS address"
+  read -r -a addrs <<<"$CUPS_ALLOW_FROM"
+  for addr in ${addrs[@]+"${addrs[@]}"}; do
+    # Names, IPv4/CIDR, @LOCAL, @IF(name), [IPv6]/prefix, *.domain, all, none.
+    [[ $addr =~ ^[][A-Za-z0-9@.:/*_()-]+$ ]] || die "CUPS_ALLOW_FROM entry '$addr' is not a CUPS address"
     CUPS_ALLOW_DIRECTIVES+="  Allow $addr"$'\n'
   done
   [[ -n $CUPS_ALLOW_DIRECTIVES ]] || die "CUPS_ALLOW_FROM must not be empty (use 'all' to allow everyone)"
   CUPS_ALLOW_DIRECTIVES=${CUPS_ALLOW_DIRECTIVES%$'\n'}
-  for addr in $CUPS_SERVER_ALIAS; do
+  read -r -a addrs <<<"$CUPS_SERVER_ALIAS"
+  for addr in ${addrs[@]+"${addrs[@]}"}; do
     [[ $addr =~ ^[A-Za-z0-9.:*_-]+$ ]] || die "CUPS_SERVER_ALIAS entry '$addr' is not a host name"
   done
 

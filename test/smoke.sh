@@ -32,7 +32,7 @@ cleanup() {
   docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  rm -f "${SECRET_FILE:-}"
+  rm -f "${SECRET_FILE:-}" "${SECRET_FILE:-}.cfg"
 }
 trap cleanup EXIT
 
@@ -163,7 +163,12 @@ invalid_config() {
   shift 2
   docker rm -f "$SERVER-bad" >/dev/null 2>&1 || true
   docker run -d --name "$SERVER-bad" "$@" "$IMAGE" >/dev/null
-  docker wait "$SERVER-bad" >/dev/null
+  # Bounded: a config that is wrongly accepted keeps running, and must fail the check, not hang.
+  for _ in $(seq 1 30); do
+    [[ $(docker inspect -f '{{.State.Running}}' "$SERVER-bad") == false ]] && break
+    sleep 1
+  done
+  docker kill "$SERVER-bad" >/dev/null 2>&1 || true # still running: exit code won't be 64
   # shellcheck disable=SC2016 # expanded by the inner bash
   check "rejects $desc (exit 64 + message)" bash -c \
     '[[ $(docker inspect -f "{{.State.ExitCode}}" "$1") == 64 ]] && docker logs "$1" 2>&1 | grep -qF -- "$2"' _ "$SERVER-bad" "$msg"
@@ -175,6 +180,16 @@ invalid_config "regex-like PAPER_SIZE" "PAPER_SIZE 'A.' is not supported" -e PAP
 invalid_config "empty TZ" "is not a known time zone" -e TZ=
 invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/
 invalid_config "OUTPUT_DIR escaping via .." "OUTPUT_DIR must not be" -e OUTPUT_DIR=/mnt/../etc/x
+invalid_config "ADVERTISED_HOST with a space" "is not a host name or IP" -e ADVERTISED_HOST="bad host"
+# Run from /etc so a glob like '*.conf' would match files if the list were word-split unquoted.
+docker run --rm -w /etc -e CUPS_ADMIN_PASSWORD=x -e ADVERTISED_HOST=fd00::12 \
+  -e CUPS_ALLOW_FROM='@LOCAL @IF(eth0) [fd00::]/8 *.conf' --entrypoint bash "$IMAGE" -c \
+  'vprint-entrypoint >/dev/null 2>&1 & for _ in $(seq 1 20); do [ -s /etc/avahi/services/vprint.service ] && [ -s /etc/cups/cupsd.conf ] && break; sleep 0.5; done; sleep 1
+   cupsd -t >/dev/null 2>&1 && echo CUPSD_OK; grep -h "Allow\|adminurl" /etc/cups/cupsd.conf /etc/avahi/services/vprint.service' >"$SECRET_FILE.cfg" 2>&1 || true
+check "allow-list accepts @IF(name) and [IPv6] and cupsd accepts the result" bash -c \
+  "grep -q CUPSD_OK '$SECRET_FILE.cfg' && grep -qxF '  Allow @IF(eth0)' '$SECRET_FILE.cfg' && grep -qxF '  Allow [fd00::]/8' '$SECRET_FILE.cfg'"
+check "allow-list entries are not glob-expanded" grep -qx '  Allow \*\.conf' "$SECRET_FILE.cfg"
+check "IPv6 ADVERTISED_HOST is bracketed in the admin URL" grep -qF 'adminurl=https://[fd00::12]:631/' "$SECRET_FILE.cfg"
 
 section "output directory handling"
 # An existing, populated directory (e.g. a host consume folder) must not be re-owned.
@@ -198,6 +213,20 @@ sleep 8
 check "unwritable output dir makes the healthcheck fail" bash -c \
   "! docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q healthy; docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'cannot be written'"
 check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&1 | grep -q 'cannot write to /mnt/output'"
+# A still-staged file must keep the title it was printed with even when cupsd no longer has the
+# job (history purged): job ids then restart, and a lookup would find whichever new job reuses
+# the id. Simulate the purge by dropping the job history before a restart.
+docker exec "$SERVER-stuck" sh -c 'rm -f /var/spool/cups/c* /var/spool/cups/d*'
+docker restart -t 2 "$SERVER-stuck" >/dev/null
+for _ in $(seq 1 30); do
+  (($(docker logs "$SERVER-stuck" 2>&1 | grep -c 'vprint-mover: watching') >= 2)) && break
+  sleep 1
+done
+printf 'other\n' | docker exec -i "$SERVER-stuck" lp -t "Other Job" >/dev/null
+sleep 4
+# Logged once before the restart and once after: the same name both times.
+check "a staged file keeps its title across a restart" test \
+  "$(docker logs "$SERVER-stuck" 2>&1 | grep -c 'cannot write.*: Stuck Job-job_1.pdf$')" = 2
 
 docker rm -f "$SERVER-stuck" >/dev/null
 
@@ -241,6 +270,14 @@ done
 check "PUID with a leading zero is read as decimal" test "$(docker exec "$SERVER-sup" stat -c %u "/mnt/output/Same Name.pdf")" = 8
 check "OUTPUT_LABEL=0 names by title and de-duplicates clashes" \
   test "$(docker exec "$SERVER-sup" ls /mnt/output | LC_ALL=C sort | tr '\n' '|')" = "Dir Clash-1.pdf|Dir Clash.pdf|Same Name-1.pdf|Same Name.pdf|"
+printf 'dot\n' | docker exec -i "$SERVER-sup" lp -t "example.com" >/dev/null
+printf 'ext\n' | docker exec -i "$SERVER-sup" lp -t "Quarterly Report.DOCX" >/dev/null
+for _ in $(seq 1 30); do
+  docker exec "$SERVER-sup" test -e /mnt/output/example.com.pdf -a -e "/mnt/output/Quarterly Report.pdf" && break
+  sleep 1
+done
+check "only known document extensions are dropped from titles" \
+  docker exec "$SERVER-sup" test -e /mnt/output/example.com.pdf -a -e "/mnt/output/Quarterly Report.pdf"
 check "a same-named directory is treated as a clash" test -n "$(docker exec "$SERVER-sup" find "/mnt/output/Dir Clash-1.pdf" -type f)"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3

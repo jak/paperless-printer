@@ -61,6 +61,13 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - An existing output directory's ownership is no longer changed at start.
 - A directory in the output folder with the same name as a new PDF no longer swallows it.
 - Several containers can share one output directory without overwriting each other's files.
+- Only known document extensions (`.docx`, `.txt`, …) are dropped from titles, so `example.com`
+  stays `example.com.pdf`.
+- `CUPS_ALLOW_FROM` accepts `@IF(name)` and bracketed IPv6 addresses, and wildcard entries are
+  no longer glob-expanded; `ADVERTISED_HOST` is validated and IPv6 addresses are bracketed.
+- The healthcheck fails when the queue is rejecting jobs.
+- Scheduled rebuilds can no longer move `latest`/`X`/`X.Y` back to an older release, and carry the
+  release tag's commit as their revision.
 - A Debian snakeoil TLS private key, identical in every copy of the image, is no longer
   shipped (CUPS didn't use it; it generates a per-container certificate).
 
