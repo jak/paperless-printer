@@ -19,9 +19,22 @@ readonly POLL_SECONDS=${VPRINT_MOVER_POLL_SECONDS:-1}
 # its temporary file for milliseconds, so this never touches another container's in-flight copy.
 readonly PARTIAL_MAX_AGE_MIN=10
 mode=$(printf '%04o' $((0666 & ~8#${UMASK})))
-declare -A warned=()
+# Health signals for vprint-healthcheck: STUCK exists while some file can't be claimed or
+# published (its mtime is when that started); HEARTBEAT is touched every loop.
+readonly STUCK=/run/vprint/mover.stuck HEARTBEAT=/run/vprint/mover.heartbeat
+# Files that failed this pass / last pass (the latter so each problem is logged once).
+declare -A failing=() warned=()
 
 log() { printf 'vprint-mover: %s\n' "$*" >&2; }
+
+# Note a file that can't make progress; log the reason only when it first starts failing.
+blocked() {
+  failing[$1]=1
+  [[ -n ${warned[$1]:-} ]] || log "$2"
+}
+
+# lpstat -r exits 0 either way; only the text tells whether cupsd is up.
+scheduler_up() { [[ $(lpstat -r 2>/dev/null) == "scheduler is running" ]]; }
 
 # place TMP NAME: rename TMP into OUTPUT_DIR as NAME, or NAME-1, NAME-2... if taken.
 # --update=none-fail never replaces an existing file (atomic no-replace rename), so a file
@@ -43,8 +56,9 @@ place() {
 }
 
 # job_title ID -> the job-name cupsd recorded for the job (empty if unknown/untitled).
+# Fails if cupsd can't be asked (not up yet, or busy past the retries), so the caller can try
+# again later instead of naming the file "untitled" for good.
 # ipptool -l prints a header, a ruler and the value with '"' and '\' backslash-escaped.
-# Retries on timeout so a busy cupsd doesn't leave the file permanently "untitled".
 job_title() {
   local out rc=1 attempt title
   for attempt in 1 2 3; do
@@ -53,7 +67,11 @@ job_title() {
     ((rc == 124)) || break
     ((attempt < 3)) && sleep 1
   done
-  ((rc == 0)) || return 0
+  if ((rc != 0)); then
+    # ipptool exits 1 both for "no such job" and "can't connect"; tell them apart.
+    ((rc != 124)) && scheduler_up && return 0
+    return 1
+  fi
   title=$(sed -n '3{s/[[:space:]]*$//; s/\\\(.\)/\1/g; p}' <<<"$out")
   [[ $title == "(stdin)" ]] && title=
   printf '%s' "$title"
@@ -91,7 +109,8 @@ output_name() {
     printf '%s' "$staged"
     return
   fi
-  title=$(sanitize "$(job_title "$id")")
+  title=$(job_title "$id") || return 1
+  title=$(sanitize "$title")
   case $OUTPUT_LABEL in
     0) printf '%s.pdf' "$title" ;;
     1) printf 'job_%s-%s.pdf' "$id" "$title" ;;
@@ -104,7 +123,7 @@ readonly CLAIM_PREFIX=.vprint-claim.
 # claim SRC: move a finished cups-pdf file into a new claim directory under its output name.
 claim() {
   local src=$1 name dir
-  name=$(output_name "${src##*/}")
+  name=$(output_name "${src##*/}") || return 2
   dir=$(mktemp -d "$VPRINT_STAGING_DIR/${CLAIM_PREFIX}XXXXXXXX") || return 1
   if ! mv -T "$src" "$dir/$name"; then
     rmdir "$dir"
@@ -121,20 +140,16 @@ publish() {
   if ! tmp=$(mktemp --suffix=.vprint-partial "$OUTPUT_DIR/.vprint-XXXXXXXXXX" 2>/dev/null) ||
     ! install -o "$PUID" -g "$PGID" -m "$mode" "$src" "$tmp" 2>/dev/null; then
     [[ -n ${tmp:-} ]] && rm -f "$tmp"
-    if [[ -z ${warned[$src]:-} ]]; then
-      log "cannot write to $OUTPUT_DIR (will keep retrying): $name"
-      warned[$src]=1
-    fi
+    blocked "$src" "cannot write to $OUTPUT_DIR (will keep retrying): $name"
     return 1
   fi
   if ! target=$(place "$tmp" "$name"); then
     rm -f "$tmp"
-    log "could not find a free file name for $name (will keep retrying)"
+    blocked "$src" "could not find a free file name for $name (will keep retrying)"
     return 1
   fi
   rm -f "$src"
   rmdir "${src%/*}" 2>/dev/null || true
-  unset 'warned[$src]'
   log "saved ${target}"
 }
 
@@ -147,6 +162,13 @@ sweep_partials() {
 }
 
 trap 'exit 0' TERM INT
+: >"$HEARTBEAT"
+rm -f "$STUCK"
+# Titles come from cupsd, so give it a moment to come up before claiming anything.
+for _ in $(seq 1 30); do
+  scheduler_up && break
+  sleep 1
+done
 sweep_partials
 # Empty claim directories are left by a crash between publishing and clean-up.
 find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name "${CLAIM_PREFIX}*" -empty -delete 2>/dev/null || true
@@ -165,7 +187,12 @@ while :; do
   for marker in "$VPRINT_STAGING_DIR"/*.done; do
     src=${marker%.done}
     if [[ -f $src ]]; then
-      claim "$src" || log "cannot claim ${src##*/} in staging (will keep retrying)"
+      claim "$src"
+      case $? in
+        0) ;;
+        2) blocked "$src" "cupsd is not answering; ${src##*/} waits for its title (will keep retrying)" ;;
+        *) blocked "$src" "cannot claim ${src##*/} in staging (will keep retrying)" ;;
+      esac
     else
       rm -f "$marker"
     fi
@@ -173,6 +200,15 @@ while :; do
   for claimed in "$VPRINT_STAGING_DIR/$CLAIM_PREFIX"*/*; do
     publish "$claimed" || true
   done
+  warned=()
+  for f in "${!failing[@]}"; do warned[$f]=1; done
+  failing=()
+  if ((${#warned[@]})); then
+    [[ -e $STUCK ]] || : >"$STUCK"
+  else
+    rm -f "$STUCK"
+  fi
+  : >"$HEARTBEAT"
   sleep "$POLL_SECONDS" &
   wait $! || true
 done

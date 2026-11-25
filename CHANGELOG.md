@@ -74,6 +74,10 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - A finished PDF waiting in staging can no longer be overwritten by a later job that reuses its
   job number, and keeps the title it was printed with.
 - `%` in `PRINTER_NAME` is advertised literally (Avahi no longer expands `%h`).
+- The healthcheck now detects a stopped scheduler and a disabled queue reliably, and only reports
+  stuck output when publishing is actually failing (not during a burst of jobs).
+- PDFs finished while cupsd is starting wait for their title instead of being saved as `untitled`.
+- CUPS's self-signed certificate survives restarts (kept with the spool).
 - Scheduled rebuilds can no longer move `latest`/`X`/`X.Y` back to an older release, and carry the
   release tag's commit as their revision.
 - A Debian snakeoil TLS private key, identical in every copy of the image, is no longer

@@ -7,17 +7,18 @@ fail() { echo "unhealthy: $*" >&2; exit 1; }
 
 alive() { [[ -r $1 ]] && kill -0 "$(<"$1")" 2>/dev/null; }
 
-lpstat -r >/dev/null 2>&1 || fail "cupsd is not responding"
+# lpstat -r exits 0 even when cupsd is down; only the text tells.
+[[ $(lpstat -r 2>/dev/null) == "scheduler is running" ]] || fail "cupsd is not responding"
 # Anchored: a rejecting queue prints "<id> not accepting requests", which contains the phrase.
 lpstat -a "$PRINTER_ID" 2>/dev/null | grep -q "^$PRINTER_ID accepting requests" || fail "queue $PRINTER_ID is not accepting jobs"
-! lpstat -p "$PRINTER_ID" 2>/dev/null | grep -q disabled || fail "queue $PRINTER_ID is disabled"
+! lpstat -p "$PRINTER_ID" 2>/dev/null | grep -q "^printer $PRINTER_ID disabled" || fail "queue $PRINTER_ID is disabled"
 alive /run/vprint/mover.pid || fail "vprint-mover is not running"
-# A finished PDF still waiting in staging means it cannot be published (e.g. the output
-# volume became read-only or full). Jobs would pile up in memory, so report it.
-# Claimed files keep cups-pdf's mtime (when the PDF was finished); unclaimed ones have a .done.
-stuck=$(find /var/spool/vprint -mindepth 1 -maxdepth 2 \( -name '*.done' -o -path '*/.vprint-claim.*/*' \) \
-  -type f ! -newermt "-${VPRINT_STUCK_SECONDS:-60} seconds" -print -quit 2>/dev/null)
-[[ -z $stuck ]] || fail "finished PDFs cannot be written to the output directory (see docker logs)"
+# vprint-mover keeps mover.stuck while finished PDFs can't be published (e.g. the output volume
+# became read-only or full); jobs would pile up, so report it once it has lasted a while.
+older() { [[ -e $1 && -n $(find "$1" ! -newermt "-$2 seconds" 2>/dev/null) ]]; }
+! older /run/vprint/mover.stuck "${VPRINT_STUCK_SECONDS:-60}" ||
+  fail "finished PDFs cannot be written to the output directory (see docker logs)"
+! older /run/vprint/mover.heartbeat 300 || fail "vprint-mover has stopped making progress"
 if [[ -e /run/vprint/avahi.pid ]]; then
   alive /run/vprint/avahi.pid || fail "avahi-daemon is not running"
 fi

@@ -13,7 +13,9 @@ err=$(mktemp) || exit 1
 /usr/bin/gs "$@" 2>"$err"
 status=$?
 if [ "$status" -ne 0 ] && [ -n "$out" ]; then
-  { echo "exit status $status"; tail -n 5 "$err"; } >"$out.failed" 2>/dev/null
+  # Written under a temporary name and renamed, so vprint-mover never reads it half-written.
+  { echo "exit status $status"; tail -n 5 "$err"; } >"$out.failed.tmp" 2>/dev/null &&
+    mv -f "$out.failed.tmp" "$out.failed"
   rm -f "$out"
 fi
 cat "$err" >&2

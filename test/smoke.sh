@@ -85,6 +85,10 @@ in_server cupsreject Paperless_Printer
 check "healthcheck fails while the queue rejects jobs" bash -c "! docker exec '$SERVER' vprint-healthcheck >/dev/null 2>&1"
 in_server cupsaccept Paperless_Printer
 check "healthcheck passes again once the queue accepts jobs" docker exec "$SERVER" vprint-healthcheck
+in_server cupsdisable Paperless_Printer
+check "healthcheck fails while the queue is disabled" bash -c "! docker exec '$SERVER' vprint-healthcheck >/dev/null 2>&1"
+in_server cupsenable Paperless_Printer
+check "healthcheck passes again once the queue is enabled" docker exec "$SERVER" vprint-healthcheck
 
 section "print over the network"
 printf 'Hello from the smoke test\n' | client lp -h "$SERVER:631" -d Paperless_Printer -U someguest -t "Anon Job.txt" >/dev/null
@@ -146,7 +150,7 @@ check "unauthenticated lpadmin is rejected" bash -c "! docker run --rm --network
 check "no password hashes in image history" bash -c "! docker history --no-trunc '$IMAGE' | grep -qE '[$][156y][$][A-Za-z0-9./]{4,}'"
 check "no private keys baked into the image" \
   bash -c "[[ -z \$(docker run --rm --entrypoint '' '$IMAGE' find /etc/ssl/private /usr/local/share/vprint/dist/cups/ssl -type f) ]]"
-check "TLS certificate is generated per container" bash -c "docker exec '$SERVER' sh -c 'ls /etc/cups/ssl/*.crt' >/dev/null"
+check "TLS certificate is generated per container" bash -c "docker exec '$SERVER' sh -c 'ls /var/spool/cups-tls/*.crt' >/dev/null"
 
 check "failed conversions are reported in the log" \
   bash -c "docker logs '$SERVER' 2>&1 | grep -q 'ERROR: PDF conversion failed for job [0-9]* \"Broken Doc\"'"
@@ -223,6 +227,8 @@ check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&
 # Restart with cupsd's job history gone (as if purged): job ids start again at 1, so a new job
 # with the same title gets the same cups-pdf file name. The queued PDF must survive the restart,
 # keep its title, and not be overwritten by the new job.
+tls_cert() { docker exec "$SERVER-stuck" sh -c 'lpstat -E -h localhost:631 -r >/dev/null; cat /var/spool/cups-tls/*.crt' | md5sum; }
+cert_before=$(tls_cert)
 # (Deleted while stopped: cupsd writes its job history back on shutdown.)
 docker stop -t 5 "$SERVER-stuck" >/dev/null
 docker run --rm -v "$VOL-spool:/var/spool" --entrypoint '' "$IMAGE" sh -c 'rm -f /var/spool/cups/c* /var/spool/cups/d*'
@@ -237,6 +243,7 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 claimed() { docker exec "$SERVER-stuck" find /var/spool/vprint -path '*/.vprint-claim.*/*' -type f "$@"; }
+check "the TLS certificate survives a restart" test "$(tls_cert)" = "$cert_before"
 check "queued PDF survives a restart and keeps its title" \
   test "$(claimed -printf '%f\n' | grep -cx 'Stuck Job-job_1.pdf')" = 2
 check "a reused job id does not overwrite the queued PDF" \

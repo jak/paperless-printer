@@ -34,6 +34,9 @@ RUN apt-get update \
  # CUPS: all logs to the container's stderr so they show up in `docker logs`.
  && sed -i -E 's#^(AccessLog|ErrorLog|PageLog) .*#\1 stderr#' /etc/cups/cups-files.conf \
  && echo 'CacheDir /run/vprint/cache' >>/etc/cups/cups-files.conf \
+ # CUPS's self-signed certificate lives with the spool (a volume in the compose examples),
+ # so it survives restarts and clients don't see a new certificate each time.
+ && echo 'ServerKeychain /var/spool/cups-tls' >>/etc/cups/cups-files.conf \
  # Account used by cups-pdf for anonymous jobs. Output ownership comes from PUID/PGID.
  && groupadd --gid 1000 vprint \
  && useradd --uid 1000 --gid vprint --no-create-home --home-dir /nonexistent \

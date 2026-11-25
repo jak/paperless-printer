@@ -98,17 +98,10 @@ validate() {
 }
 
 seed_runtime() {
-  local ssl=
-  # Keep CUPS's self-signed certificate across restarts of the same container.
-  [[ -d $RUN_DIR/etc/cups/ssl ]] && ssl=$(mktemp -d) && cp -a "$RUN_DIR/etc/cups/ssl/." "$ssl/"
   rm -rf "$RUN_DIR"
   mkdir -p "$RUN_DIR/etc" "$RUN_DIR/log" "$RUN_DIR/cache" "$ACCOUNTS_ROOT"
   cp -a "$DIST_DIR/cups" "$DIST_DIR/avahi" "$RUN_DIR/etc/"
   cp -a "$DIST_DIR/accounts/etc" "$ACCOUNTS_ROOT/"
-  if [[ -n $ssl ]]; then
-    cp -a "$ssl/." "$RUN_DIR/etc/cups/ssl/"
-    rm -rf "$ssl"
-  fi
 }
 
 setup_users() {
@@ -223,6 +216,8 @@ render_config() {
 prepare_dirs() {
   # Staging is shared by every job user (sticky, like /tmp); only vprint-mover (root) reads it.
   install -d -m 1733 -o root -g lpadmin "$VPRINT_STAGING_DIR"
+  # CUPS's TLS keychain (ServerKeychain); kept across restarts with the spool.
+  install -d -m 0700 -o root -g lp /var/spool/cups-tls
   # Files are owned by PUID:PGID individually. The directory itself is only given that
   # owner when we create it, or when it is an empty root-owned directory (a fresh Docker
   # volume), so the consumer can delete files. An existing, populated or non-root-owned
