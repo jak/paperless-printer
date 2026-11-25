@@ -60,7 +60,8 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   consistently.
 - cupsd's DNS-SD errors (`Unable to communicate with avahi-daemon`): Avahi is the single
   discovery mechanism.
-- Static printer UUID shared by every deployment.
+- Static printer UUID shared by every deployment: each deployment now gets a random UUID on
+  first start, kept with `/var/spool` (or set `PRINTER_UUID`).
 - Unbounded log files inside the container.
 - Job titles containing commas or quotes no longer produce mangled file names.
 - Stricter validation: `PRINTER_NAME` length and characters, exact `PAPER_SIZE` match, empty

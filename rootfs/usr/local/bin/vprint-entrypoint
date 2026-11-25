@@ -167,16 +167,22 @@ setup_users() {
   fi
 }
 
-derive_uuid() {
-  # Stable per PRINTER_ID so clients keep recognising the same printer across restarts,
-  # but distinct per instance when several printers run on one network.
-  local h
-  h=$(printf 'virtual-cups-printer:%s' "$PRINTER_ID" | md5sum | cut -c1-32)
-  printf '%s-%s-3%s-%x%s-%s' "${h:0:8}" "${h:8:4}" "${h:13:3}" $((0x${h:16:1} & 0x3 | 0x8)) "${h:17:3}" "${h:20:12}"
+# stored_uuid: a random UUID generated on first start and kept with the spool (a volume in the
+# compose examples), so clients keep recognising the printer across restarts while every
+# deployment gets its own, even with the default PRINTER_ID.
+stored_uuid() {
+  local f=/var/spool/vprint-state/printer-uuid u=
+  install -d -m 0755 "${f%/*}"
+  [[ -s $f ]] && u=$(<"$f")
+  if ! [[ $u =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    u=$(</proc/sys/kernel/random/uuid)
+    printf '%s\n' "$u" >"$f"
+  fi
+  printf '%s' "$u"
 }
 
 render_config() {
-  PRINTER_UUID=${PRINTER_UUID:-$(derive_uuid)}
+  PRINTER_UUID=${PRINTER_UUID:-$(stored_uuid)}
   PRINTER_UUID=${PRINTER_UUID,,}
   PRINTER_NAME_XML=$(xml_escape "$PRINTER_NAME")
   PRINTER_LOCATION_XML=$(xml_escape "$PRINTER_LOCATION")

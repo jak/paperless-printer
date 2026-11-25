@@ -215,10 +215,12 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
-          PACKAGE: ${{ github.event.repository.name }}
           TAG: candidate-${{ github.run_id }}
         run: |
           set -euo pipefail
+          # From GITHUB_REPOSITORY, always set (a scheduled run's event payload may lack it).
+          PACKAGE=${GITHUB_REPOSITORY#*/}
+          PACKAGE=${PACKAGE,,}
           kind=users
           [[ $(gh api "users/$OWNER" --jq .type) == Organization ]] && kind=orgs
           base="$kind/$OWNER/packages/container/$PACKAGE/versions"

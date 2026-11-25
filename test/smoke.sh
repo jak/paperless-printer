@@ -79,8 +79,9 @@ check "Avahi does not expand wildcards such as %h in the printer name" \
   bash -c "! docker exec '$SERVER' grep -q replace-wildcards /etc/avahi/services/vprint.service"
 check "PPD default paper size follows PAPER_SIZE" \
   bash -c "docker exec '$SERVER' grep -q '^\*DefaultPageSize: Letter' /etc/cups/ppd/Paperless_Printer.ppd"
-check "printer UUID is derived (not the old static one)" \
-  bash -c "! docker exec '$SERVER' grep -q b5105127 /etc/cups/printers.conf"
+uuid_of() { docker exec "$1" sed -n 's/^UUID urn:uuid://p' /etc/cups/printers.conf; }
+check "printer UUID is a random per-deployment UUID (not the old static one)" bash -c \
+  "[[ \$(docker exec '$SERVER' sed -n 's/^UUID urn:uuid://p' /etc/cups/printers.conf) =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4 ]]"
 in_server cupsreject Paperless_Printer
 check "healthcheck fails while the queue rejects jobs" bash -c "! docker exec '$SERVER' vprint-healthcheck >/dev/null 2>&1"
 in_server cupsaccept Paperless_Printer
@@ -282,6 +283,7 @@ check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&
 # Restart with cupsd's job history and job.cache gone (as if lost): job ids start again at 1, so a new job
 # with the same title gets the same cups-pdf file name. The queued PDF must survive the restart,
 # keep its title, and not be overwritten by the new job.
+uuid_before=$(uuid_of "$SERVER-stuck")
 tls_cert() { docker exec "$SERVER-stuck" sh -c 'lpstat -E -h localhost:631 -r >/dev/null; cat /var/spool/cups-tls/*.crt' | md5sum; }
 cert_before=$(tls_cert)
 # (Deleted while stopped: cupsd writes its job history back on shutdown.)
@@ -301,6 +303,8 @@ for _ in $(seq 1 20); do
 done
 claimed() { docker exec "$SERVER-stuck" find /var/spool/vprint -path '*/.vprint-claim.*/*' -type f "$@"; }
 check "the TLS certificate survives a restart" test "$(tls_cert)" = "$cert_before"
+check "the printer UUID survives a restart" test "$(uuid_of "$SERVER-stuck")" = "$uuid_before"
+check "different deployments get different UUIDs" test "$(uuid_of "$SERVER-stuck")" != "$(uuid_of "$SERVER")"
 check "an interrupted conversion's leftover is removed from staging" bash -c \
   "! docker exec '$SERVER-stuck' test -e /var/spool/vprint/Orphan-job_99.pdf && docker logs '$SERVER-stuck' 2>&1 | grep -q 'removing an incomplete PDF.*Orphan-job_99'"
 check "queued PDF survives a restart and keeps its title" \

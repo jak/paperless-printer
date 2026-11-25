@@ -54,7 +54,7 @@ at start with a clear message (exit code 64).
 | `PRINTER_NAME` | `Paperless Printer` | Name shown to clients (at most 63 bytes, no `#`) |
 | `PRINTER_ID` | `Paperless_Printer` | CUPS queue name (letters, digits, `_`, `-`); used in the URL `/printers/<id>` |
 | `PRINTER_LOCATION` | *(empty)* | Location shown to clients |
-| `PRINTER_UUID` | *derived from `PRINTER_ID`* | Fixed UUID, if you need one |
+| `PRINTER_UUID` | *random, kept in `/var/spool`* | Fixed UUID, if you need one. By default a random UUID is generated on first start and kept with the spool, so it stays stable while `/var/spool` is kept |
 | `PAPER_SIZE` | `A4` | Default paper size, e.g. `A4`, `Letter`, `Legal`, `A5` |
 | `TZ` | `UTC` | Time zone for timestamps |
 | `OUTPUT_DIR` | `/mnt/output` | Where PDFs are written inside the container (mount a volume here). An existing directory's ownership is never changed; only a new or empty root-owned one (a fresh volume) is given to `PUID:PGID` |
