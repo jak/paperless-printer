@@ -26,10 +26,11 @@ is_true() {
 
 xml_escape() {
   local s=$1
-  s=${s//&/&amp;}
-  s=${s//</&lt;}
-  s=${s//>/&gt;}
-  s=${s//\"/&quot;}
+  # Quoted replacements: with bash 5.2's patsub_replacement an unquoted `&` means the match.
+  s=${s//'&'/'&amp;'}
+  s=${s//'<'/'&lt;'}
+  s=${s//'>'/'&gt;'}
+  s=${s//'"'/'&quot;'}
   printf '%s' "$s"
 }
 
@@ -116,7 +117,8 @@ setup_users() {
   local password generated=
   password=$(read_secret CUPS_ADMIN_PASSWORD)
   if [[ -z $password ]]; then
-    password=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
+    # No `tr </dev/urandom | head` pipeline: tr gets SIGPIPE, which pipefail turns into a fatal 141.
+    password=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
     generated=1
   fi
   if ! id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1; then

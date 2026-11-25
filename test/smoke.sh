@@ -66,7 +66,7 @@ chmod 0644 "$SECRET_FILE"
 docker volume create "$VOL" >/dev/null
 docker run -d --name "$SERVER" --network "$NET" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} \
   -e CUPS_ADMIN_PASSWORD_FILE=/run/secrets/admin -v "$SECRET_FILE:/run/secrets/admin:ro" \
-  -e PRINTER_NAME="Smoke & Test Printer" -e CUPS_ALLOW_FROM=@LOCAL \
+  -e PRINTER_NAME="Smoke & <Test> Printer" -e PRINTER_LOCATION='Desk "B"' -e CUPS_ALLOW_FROM=@LOCAL \
   -e PUID=1234 -e PGID=2345 -e UMASK=0027 \
   -e PAPER_SIZE=Letter -e TZ=Europe/London \
   -v "$VOL:/mnt/output" "$IMAGE" >/dev/null
@@ -74,7 +74,7 @@ check "container becomes healthy" wait_healthy "$SERVER"
 check "CUPS logs reach docker logs" bash -c "docker logs '$SERVER' 2>&1 | grep -q 'vprint-mover: watching'"
 check "avahi publishes the service" bash -c "docker logs '$SERVER' 2>&1 | grep -q 'successfully established'"
 check "avahi service file is valid XML with escaped name" \
-  bash -c "docker exec '$SERVER' grep -q 'Smoke &amp; Test Printer' /etc/avahi/services/vprint.service"
+  bash -c "svc=\$(docker exec '$SERVER' cat /etc/avahi/services/vprint.service); grep -qF '>Smoke &amp; &lt;Test&gt; Printer<' <<<\"\$svc\" && grep -qF 'note=Desk &quot;B&quot;<' <<<\"\$svc\" && ! grep -q '<lt;' <<<\"\$svc\""
 check "PPD default paper size follows PAPER_SIZE" \
   bash -c "docker exec '$SERVER' grep -q '^\*DefaultPageSize: Letter' /etc/cups/ppd/Paperless_Printer.ppd"
 check "printer UUID is derived (not the old static one)" \
@@ -176,8 +176,11 @@ section "output directory handling"
 # An existing, populated directory (e.g. a host consume folder) must not be re-owned.
 docker volume create "$VOL-shared" >/dev/null
 docker run --rm -v "$VOL-shared:/d" --entrypoint '' "$IMAGE" sh -c 'touch /d/scanner-file && chown 4321:4321 /d /d/scanner-file'
-docker run -d --name "$SERVER-stuck" -e CUPS_ADMIN_PASSWORD=x -e PUID=1234 -v "$VOL-shared:/mnt/output" "$IMAGE" >/dev/null
+# No admin password configured (the default): must start and log a generated one.
+docker run -d --name "$SERVER-stuck" -e PUID=1234 -v "$VOL-shared:/mnt/output" "$IMAGE" >/dev/null
 check "container with shared output dir healthy" wait_healthy "$SERVER-stuck"
+check "no admin password set: one is generated and logged" bash -c \
+  "docker logs '$SERVER-stuck' 2>&1 | grep -A1 'generated a one-off admin password' | grep -Eq '[0-9a-f]{24}'"
 check "existing populated output dir keeps its owner" test "$(docker exec "$SERVER-stuck" stat -c %u /mnt/output)" = 4321
 docker rm -f "$SERVER-stuck" >/dev/null
 
