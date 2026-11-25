@@ -1,0 +1,12 @@
+# ipptool test used by vprint-mover to look up a job's title.
+{
+  OPERATION Get-Job-Attributes
+  GROUP operation-attributes-tag
+  ATTR charset attributes-charset utf-8
+  ATTR naturalLanguage attributes-natural-language en
+  ATTR uri job-uri $uri
+  ATTR name requesting-user-name root
+  ATTR keyword requested-attributes job-name
+  STATUS successful-ok
+  DISPLAY job-name
+}

@@ -1,0 +1,105 @@
+#!/bin/bash
+# Publish finished PDFs from the cups-pdf staging directory into OUTPUT_DIR.
+#
+# Each file is copied into OUTPUT_DIR under a hidden temporary name with the configured
+# owner and mode, then renamed into place. rename(2) is atomic within one directory, so a
+# watcher (e.g. paperless-ngx) only ever sees complete files. Files that cannot be
+# published (e.g. read-only volume) stay in staging and are retried.
+set -uo pipefail
+shopt -s nullglob dotglob
+
+# shellcheck source=/dev/null
+. /run/vprint/env
+
+readonly POLL_SECONDS=${VPRINT_MOVER_POLL_SECONDS:-1}
+mode=$(printf '%04o' $((0666 & ~8#${UMASK})))
+declare -A warned=()
+
+log() { printf 'vprint-mover: %s\n' "$*" >&2; }
+
+# unique_target NAME -> OUTPUT_DIR/NAME, or NAME with -1, -2... before the extension if taken.
+unique_target() {
+  local name=$1 base ext n=1 target
+  target="$OUTPUT_DIR/$name"
+  base=${name%.*}
+  ext=${name##*.}
+  [[ $base == "$name" ]] && ext= || ext=".$ext"
+  while [[ -e $target ]]; do
+    target="$OUTPUT_DIR/${base}-${n}${ext}"
+    n=$((n + 1))
+  done
+  printf '%s' "$target"
+}
+
+# job_title ID -> the job-name cupsd recorded for the job (empty if unknown/untitled).
+job_title() {
+  local title
+  title=$(timeout 5 ipptool -c "ipp://localhost/jobs/$1" /etc/vprint/get-job-name.test 2>/dev/null | sed -n '2p') || true
+  [[ $title == "(stdin)" ]] && title=
+  printf '%s' "$title"
+}
+
+# sanitize TITLE -> a safe single path component: no slashes, control characters or
+# leading dots; a short trailing extension (".txt", ".docx") is dropped; at most 100 bytes.
+sanitize() {
+  local s=$1
+  s=${s//[[:cntrl:]]/ }
+  s=${s//[\/\\:*?\"<>|]/_}
+  s=$(sed -E 's/[[:space:]]+/ /g; s/^[ .]+//; s/[ .]+$//; s/\.[A-Za-z][A-Za-z0-9]{0,3}$//' <<<"$s")
+  # Truncate by bytes, then drop any multi-byte character cut in half.
+  s=$(printf '%s' "$s" | head -c 100 | iconv -f UTF-8 -t UTF-8 -c)
+  printf '%s' "${s:-untitled}"
+}
+
+# output_name STAGED_NAME -> final file name, honouring OUTPUT_LABEL.
+# cups-pdf always produces "<title>-job_<id>.pdf"; the title part is unreliable, so the job's
+# real title is fetched from cupsd instead.
+output_name() {
+  local staged=$1 id title
+  if [[ $staged =~ -job_([0-9]+)\.pdf$ ]]; then
+    id=${BASH_REMATCH[1]}
+  else
+    printf '%s' "$staged"
+    return
+  fi
+  title=$(sanitize "$(job_title "$id")")
+  case $OUTPUT_LABEL in
+    0) printf '%s.pdf' "$title" ;;
+    1) printf 'job_%s-%s.pdf' "$id" "$title" ;;
+    *) printf '%s-job_%s.pdf' "$title" "$id" ;;
+  esac
+}
+
+publish() {
+  local src=$1 name tmp target
+  name=$(output_name "${src##*/}")
+  tmp="$OUTPUT_DIR/.${name}.vprint-partial"
+  if ! install -o "$PUID" -g "$PGID" -m "$mode" "$src" "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    if [[ -z ${warned[$src]:-} ]]; then
+      log "cannot write to $OUTPUT_DIR (will keep retrying): $name"
+      warned[$src]=1
+    fi
+    return 1
+  fi
+  target=$(unique_target "$name")
+  mv -f "$tmp" "$target"
+  rm -f "$src" "$src.done"
+  unset 'warned[$src]'
+  log "saved ${target}"
+}
+
+trap 'exit 0' TERM INT
+log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
+while :; do
+  for marker in "$VPRINT_STAGING_DIR"/*.done; do
+    src=${marker%.done}
+    if [[ -f $src ]]; then
+      publish "$src" || true
+    else
+      rm -f "$marker"
+    fi
+  done
+  sleep "$POLL_SECONDS" &
+  wait $! || true
+done

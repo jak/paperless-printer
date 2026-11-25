@@ -1,4 +1,229 @@
 #!/bin/bash
-set -ex
-/usr/sbin/avahi-daemon --daemonize
-exec /usr/sbin/cupsd -f
+# Configure CUPS, cups-pdf and Avahi from environment variables, then supervise
+# cupsd, avahi-daemon and vprint-mover. If any of them exits, the container exits
+# so the restart policy can recover it.
+set -euo pipefail
+
+readonly TEMPLATES=/etc/vprint/templates
+readonly RUN_DIR=/run/vprint
+export VPRINT_STAGING_DIR=/var/spool/vprint
+
+log() { printf 'vprint: %s\n' "$*" >&2; }
+die() { log "ERROR: $*"; exit 64; }
+
+is_true() {
+  case "${1,,}" in
+    1 | y | yes | true | on) return 0 ;;
+    0 | n | no | false | off) return 1 ;;
+    *) die "expected yes/no, got '$1'" ;;
+  esac
+}
+
+xml_escape() {
+  local s=$1
+  s=${s//&/&amp;}
+  s=${s//</&lt;}
+  s=${s//>/&gt;}
+  s=${s//\"/&quot;}
+  printf '%s' "$s"
+}
+
+# render TEMPLATE DEST: substitute only the listed variables so a literal `$` elsewhere survives.
+render() {
+  envsubst "$RENDER_VARS" <"$TEMPLATES/$1" >"$2"
+}
+
+read_secret() {
+  # Prefer *_FILE (Docker/compose secrets) over the plain variable.
+  local name=$1 file_var="${1}_FILE"
+  if [[ -n ${!file_var:-} ]]; then
+    [[ -r ${!file_var} ]] || die "$file_var points to unreadable file '${!file_var}'"
+    # $(<file) strips trailing newlines, which secrets files usually end with.
+    local v
+    v=$(<"${!file_var}")
+    printf '%s' "$v"
+  else
+    printf '%s' "${!name:-}"
+  fi
+}
+
+validate() {
+  [[ $PRINTER_ID =~ ^[A-Za-z0-9_-]{1,127}$ ]] ||
+    die "PRINTER_ID must be 1-127 letters, digits, '_' or '-' (got '$PRINTER_ID')"
+  local v
+  for v in PRINTER_NAME PRINTER_LOCATION; do
+    [[ ${!v} != *$'\n'* ]] || die "$v must be a single line"
+  done
+  [[ -n $PRINTER_NAME ]] || die "PRINTER_NAME must not be empty"
+  [[ -z $PRINTER_UUID || ${PRINTER_UUID,,} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+    die "PRINTER_UUID must be a UUID like 2d1b6c3e-0d2f-4c6a-9f4e-7f0a1b2c3d4e"
+  [[ $PUID =~ ^[0-9]+$ && $PGID =~ ^[0-9]+$ ]] || die "PUID and PGID must be numeric"
+  ((PUID != 0 && PGID != 0)) || die "PUID/PGID 0 (root) is not supported"
+  [[ $UMASK =~ ^0?[0-7]{3}$ ]] || die "UMASK must be octal, e.g. 0022 (got '$UMASK')"
+  [[ $OUTPUT_LABEL =~ ^[012]$ ]] || die "OUTPUT_LABEL must be 0, 1 or 2"
+  [[ $OUTPUT_DIR == /* ]] || die "OUTPUT_DIR must be an absolute path"
+  [[ $CUPS_LOG_LEVEL =~ ^(none|emerg|alert|crit|error|warn|notice|info|debug|debug2)$ ]] ||
+    die "CUPS_LOG_LEVEL must be a CUPS LogLevel (warn, info, debug, ...)"
+  [[ $CUPS_ADMIN_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "CUPS_ADMIN_USER is not a valid user name"
+  case $CUPS_ADMIN_USER in
+    root | vprint | lp | daemon | avahi) die "CUPS_ADMIN_USER must not be the system account '$CUPS_ADMIN_USER'" ;;
+  esac
+  [[ -e /usr/share/zoneinfo/$TZ ]] || die "TZ '$TZ' is not a known time zone"
+  grep -q "^\*PageSize ${PAPER_SIZE}/" "$PPD_SOURCE" ||
+    die "PAPER_SIZE '$PAPER_SIZE' is not supported; choose one of: $(grep -oP '^\*PageSize \K[^/]+' "$PPD_SOURCE" | tr '\n' ' ')"
+  is_true "$AVAHI_ENABLED" || true
+  is_true "$CUPS_WEB_INTERFACE" || true
+}
+
+setup_users() {
+  groupmod --non-unique --gid "$PGID" vprint
+  usermod --non-unique --uid "$PUID" --gid "$PGID" vprint
+
+  local password generated=
+  password=$(read_secret CUPS_ADMIN_PASSWORD)
+  if [[ -z $password ]]; then
+    password=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
+    generated=1
+  fi
+  if ! id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+      --groups lpadmin "$CUPS_ADMIN_USER"
+  fi
+  printf '%s:%s\n' "$CUPS_ADMIN_USER" "$password" | chpasswd --crypt-method SHA512
+  if [[ -n $generated ]]; then
+    log "No CUPS_ADMIN_PASSWORD set; generated a one-off admin password for this start:"
+    log "  user: $CUPS_ADMIN_USER  password: $password"
+    log "Set CUPS_ADMIN_PASSWORD or CUPS_ADMIN_PASSWORD_FILE to keep it stable."
+  fi
+}
+
+derive_uuid() {
+  # Stable per PRINTER_ID so clients keep recognising the same printer across restarts,
+  # but distinct per instance when several printers run on one network.
+  local h
+  h=$(printf 'virtual-cups-printer:%s' "$PRINTER_ID" | md5sum | cut -c1-32)
+  printf '%s-%s-3%s-%x%s-%s' "${h:0:8}" "${h:8:4}" "${h:13:3}" $((0x${h:16:1} & 0x3 | 0x8)) "${h:17:3}" "${h:20:12}"
+}
+
+render_config() {
+  PRINTER_UUID=${PRINTER_UUID:-$(derive_uuid)}
+  PRINTER_UUID=${PRINTER_UUID,,}
+  PRINTER_NAME_XML=$(xml_escape "$PRINTER_NAME")
+  PRINTER_LOCATION_XML=$(xml_escape "$PRINTER_LOCATION")
+  VPRINT_NOW=$(date +%s)
+  VPRINT_ADMINURL_RECORD=
+  if [[ -n $ADVERTISED_HOST ]]; then
+    VPRINT_ADMINURL_RECORD=$'\n'"    <txt-record>adminurl=https://$(xml_escape "$ADVERTISED_HOST"):631/printers/${PRINTER_ID}</txt-record>"
+  fi
+  CUPS_WEB_INTERFACE=$(is_true "$CUPS_WEB_INTERFACE" && echo Yes || echo No)
+  local addr
+  CUPS_ALLOW_DIRECTIVES=
+  for addr in $CUPS_ALLOW_FROM; do
+    [[ $addr =~ ^[A-Za-z0-9@.:/*_-]+$ ]] || die "CUPS_ALLOW_FROM entry '$addr' is not a CUPS address"
+    CUPS_ALLOW_DIRECTIVES+="  Allow $addr"$'\n'
+  done
+  [[ -n $CUPS_ALLOW_DIRECTIVES ]] || die "CUPS_ALLOW_FROM must not be empty (use 'all' to allow everyone)"
+  CUPS_ALLOW_DIRECTIVES=${CUPS_ALLOW_DIRECTIVES%$'\n'}
+  for addr in $CUPS_SERVER_ALIAS; do
+    [[ $addr =~ ^[A-Za-z0-9.:*_-]+$ ]] || die "CUPS_SERVER_ALIAS entry '$addr' is not a host name"
+  done
+
+  export PRINTER_ID PRINTER_NAME PRINTER_LOCATION PRINTER_UUID PRINTER_NAME_XML PRINTER_LOCATION_XML \
+    VPRINT_NOW VPRINT_ADMINURL_RECORD CUPS_WEB_INTERFACE CUPS_ALLOW_DIRECTIVES CUPS_SERVER_ALIAS \
+    CUPS_LOG_LEVEL
+  RENDER_VARS='$PRINTER_ID $PRINTER_NAME $PRINTER_LOCATION $PRINTER_UUID $PRINTER_NAME_XML $PRINTER_LOCATION_XML $VPRINT_NOW $VPRINT_ADMINURL_RECORD $CUPS_WEB_INTERFACE $CUPS_ALLOW_DIRECTIVES $CUPS_SERVER_ALIAS $CUPS_LOG_LEVEL $VPRINT_STAGING_DIR'
+
+  render cupsd.conf /etc/cups/cupsd.conf
+  render cups-pdf.conf /etc/cups/cups-pdf.conf
+  render printers.conf /etc/cups/printers.conf
+  chmod 0600 /etc/cups/printers.conf
+  # A stale PPD/printer from a previous PRINTER_ID would otherwise linger in the web UI.
+  rm -f /etc/cups/ppd/*.ppd /etc/cups/printers.conf.O
+  sed -E \
+    -e "s#^\*(DefaultPageSize|DefaultPageRegion|DefaultImageableArea|DefaultPaperDimension):.*#*\1: ${PAPER_SIZE}#" \
+    "$PPD_SOURCE" >"/etc/cups/ppd/${PRINTER_ID}.ppd"
+  chown root:lp "/etc/cups/ppd/${PRINTER_ID}.ppd"
+  chmod 0640 "/etc/cups/ppd/${PRINTER_ID}.ppd"
+  printf '%s\n' "${PAPER_SIZE,,}" >/etc/papersize
+
+  if is_true "$AVAHI_ENABLED"; then
+    render vprint.service /etc/avahi/services/vprint.service
+  else
+    rm -f /etc/avahi/services/vprint.service
+  fi
+
+  # Runtime settings for vprint-mover.
+  mkdir -p "$RUN_DIR"
+  {
+    printf 'OUTPUT_DIR=%q\n' "$OUTPUT_DIR"
+    printf 'PUID=%q\nPGID=%q\nUMASK=%q\n' "$PUID" "$PGID" "$UMASK"
+    printf 'VPRINT_STAGING_DIR=%q\n' "$VPRINT_STAGING_DIR"
+    printf 'OUTPUT_LABEL=%q\n' "$OUTPUT_LABEL"
+  } >"$RUN_DIR/env"
+
+  log "printer '$PRINTER_NAME' (queue $PRINTER_ID, uuid $PRINTER_UUID, paper $PAPER_SIZE) -> $OUTPUT_DIR as $PUID:$PGID umask $UMASK"
+}
+
+prepare_dirs() {
+  # Staging is shared by every job user (sticky, like /tmp); only vprint-mover (root) reads it.
+  install -d -m 1733 -o root -g lpadmin "$VPRINT_STAGING_DIR"
+  mkdir -p "$OUTPUT_DIR"
+  if [[ $(stat -c '%u:%g' "$OUTPUT_DIR") != "$PUID:$PGID" ]]; then
+    chown "$PUID:$PGID" "$OUTPUT_DIR" ||
+      log "WARNING: could not chown $OUTPUT_DIR to $PUID:$PGID; files will still be owned by $PUID:$PGID"
+  fi
+  # cups-pdf writes its log to /var/log/cups/cups-pdf-<queue>_log; send it to the container log.
+  mkdir -p /var/log/cups
+  ln -sf /proc/1/fd/2 /var/log/cups/cups-pdf_log
+  ln -sf /proc/1/fd/2 "/var/log/cups/cups-pdf-${PRINTER_ID}_log"
+  mkdir -p /run/cups /run/avahi-daemon
+  rm -f /run/avahi-daemon/pid
+}
+
+pids=()
+shutdown() {
+  log "stopping"
+  trap - TERM INT
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  wait
+  exit 0
+}
+
+main() {
+  PPD_SOURCE=/usr/share/ppd/cups-pdf/CUPS-PDF_noopt.ppd
+  [[ -r $PPD_SOURCE ]] || die "cups-pdf PPD not found at $PPD_SOURCE"
+  validate
+  setup_users
+  render_config
+  prepare_dirs
+
+  # Fail fast on a broken configuration instead of crash-looping in the background.
+  /usr/sbin/cupsd -t -c /etc/cups/cupsd.conf >/dev/null || die "cupsd rejected the generated configuration"
+
+  trap shutdown TERM INT
+
+  /usr/sbin/cupsd -f &
+  pids+=($!)
+  echo $! >"$RUN_DIR/cupsd.pid"
+
+  if is_true "$AVAHI_ENABLED"; then
+    /usr/sbin/avahi-daemon --no-rlimits &
+    pids+=($!)
+    echo $! >"$RUN_DIR/avahi.pid"
+  else
+    rm -f "$RUN_DIR/avahi.pid"
+  fi
+
+  /usr/local/bin/vprint-mover &
+  pids+=($!)
+  echo $! >"$RUN_DIR/mover.pid"
+
+  local status=0
+  wait -n "${pids[@]}" || status=$?
+  log "a supervised process exited (status $status); shutting down so the container can be restarted"
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  wait || true
+  exit $((status == 0 ? 1 : status))
+}
+
+main "$@"

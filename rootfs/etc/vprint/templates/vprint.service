@@ -1,31 +1,34 @@
-<?xml version="1.0" ?><!DOCTYPE service-group  SYSTEM 'avahi-service.dtd'>
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Rendered by vprint-entrypoint at container start. AirPrint/IPP Everywhere advertisement. -->
 <service-group>
-  <name replace-wildcards="yes">Paperless Printer</name>
+  <name replace-wildcards="yes">${PRINTER_NAME_XML}</name>
   <service>
     <type>_ipp._tcp</type>
     <subtype>_universal._sub._ipp._tcp</subtype>
     <port>631</port>
     <txt-record>txtvers=1</txt-record>
     <txt-record>qtotal=1</txt-record>
-    <txt-record>note=Virtual Paperless Printer</txt-record>
-    <txt-record>pdl=application/pdf,application/postscript,image/urf</txt-record>
-    <txt-record>rp=printers/Paperless_Printer</txt-record>
-    <txt-record>Bind=F</txt-record>
-    <txt-record>Collate=F</txt-record>
+    <txt-record>rp=printers/${PRINTER_ID}</txt-record>
+    <txt-record>ty=${PRINTER_NAME_XML}</txt-record>
+    <txt-record>product=(CUPS-PDF)</txt-record>
+    <txt-record>note=${PRINTER_LOCATION_XML}</txt-record>
+    <txt-record>UUID=${PRINTER_UUID}</txt-record>${VPRINT_ADMINURL_RECORD}
+    <txt-record>TLS=1.2</txt-record>
+    <txt-record>pdl=application/pdf,application/postscript,image/urf,image/jpeg,image/png</txt-record>
+    <txt-record>URF=W8,SRGB24,CP255,RS600,DM1</txt-record>
     <txt-record>Color=T</txt-record>
-    <txt-record>Copies=F</txt-record>
     <txt-record>Duplex=F</txt-record>
-    <txt-record>PaperCustom=F</txt-record>
-    <txt-record>PaperMax=legal-A4</txt-record>
+    <txt-record>Copies=F</txt-record>
+    <txt-record>Collate=F</txt-record>
+    <txt-record>Bind=F</txt-record>
     <txt-record>Punch=0</txt-record>
-    <txt-record>Scan=F</txt-record>
     <txt-record>Sort=F</txt-record>
     <txt-record>Staple=F</txt-record>
-    <txt-record>URF=W8,SRGB24,CP255,RS600,DM1</txt-record>
-    <txt-record>product=(Generic PostScript Printer)</txt-record>
-    <txt-record>ty=Generic PostScript Printer</txt-record>
-    <txt-record>printer-state=3</txt-record>
-    <txt-record>printer-type=0x800004</txt-record>
-    <txt-record>application/postscript</txt-record>
+    <txt-record>Scan=F</txt-record>
+    <txt-record>PaperCustom=F</txt-record>
+    <txt-record>PaperMax=legal-A4</txt-record>
+    <!-- Same value cupsd computes for this queue (printers.conf "Type 8400972"); includes the colour bit (0x8). -->
+    <txt-record>printer-type=0x80304C</txt-record>
   </service>
 </service-group>

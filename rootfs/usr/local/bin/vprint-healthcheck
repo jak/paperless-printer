@@ -1,0 +1,17 @@
+#!/bin/bash
+# Docker HEALTHCHECK: healthy when cupsd is up, the queue accepts jobs, and every
+# supervised helper process is alive.
+set -euo pipefail
+
+fail() { echo "unhealthy: $*" >&2; exit 1; }
+
+alive() { [[ -r $1 ]] && kill -0 "$(<"$1")" 2>/dev/null; }
+
+lpstat -r >/dev/null 2>&1 || fail "cupsd is not responding"
+lpstat -a "$PRINTER_ID" 2>/dev/null | grep -q "accepting requests" || fail "queue $PRINTER_ID is not accepting jobs"
+! lpstat -p "$PRINTER_ID" 2>/dev/null | grep -q disabled || fail "queue $PRINTER_ID is disabled"
+alive /run/vprint/mover.pid || fail "vprint-mover is not running"
+if [[ -e /run/vprint/avahi.pid ]]; then
+  alive /run/vprint/avahi.pid || fail "avahi-daemon is not running"
+fi
+echo healthy
