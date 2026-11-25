@@ -60,6 +60,7 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   `TZ`, `PUID`/`PGID` with leading zeros, system directories as `OUTPUT_DIR`.
 - An existing output directory's ownership is no longer changed at start.
 - A directory in the output folder with the same name as a new PDF no longer swallows it.
+- Several containers can share one output directory without overwriting each other's files.
 - A Debian snakeoil TLS private key, identical in every copy of the image, is no longer
   shipped (CUPS didn't use it; it generates a per-container certificate).
 
