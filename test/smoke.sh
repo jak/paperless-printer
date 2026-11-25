@@ -126,7 +126,7 @@ check "path characters in titles are neutralised" bash -c "printf '%s\n' \"\$@\"
 check "no partial or hidden files left behind" bash -c "[[ -z \$(docker exec '$SERVER' find /mnt/output -name '.*' -type f) ]]"
 # Staging is writable by every user in the container: a non-root process planting symlinks must
 # not get root to log or publish files it can't read itself.
-docker exec -u vprint "$SERVER" sh -c 'cd /var/spool/vprint && ln -s /etc/shadow leak.failed &&
+docker exec -u 1000:1000 "$SERVER" sh -c 'cd /var/spool/vprint && ln -s /etc/shadow leak.failed &&
   ln -s /etc/shadow Leak-job_900.pdf && : >Leak-job_900.pdf.done'
 for _ in $(seq 1 15); do
   docker exec "$SERVER" sh -c 'ls -A /var/spool/vprint | grep -qi leak' || break
