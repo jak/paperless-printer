@@ -39,6 +39,8 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   capabilities, `no-new-privileges` and a read-only root filesystem.
 - Failed PDF conversions are reported in the log instead of silently producing no file.
 - The healthcheck fails when finished PDFs can't be written to the output directory.
+- Every build (including the weekly security rebuild) applies current Debian security updates
+  on top of the digest-pinned base image.
 - The release workflow tests the exact multi-arch image it publishes (lint, smoke test on
   amd64 and arm64 in both modes, Trivy) before promoting it to version tags.
 - End-to-end smoke test and lint suite; CI on amd64 and arm64 with a weekly build; Trivy
@@ -57,6 +59,7 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - Stricter validation: `PRINTER_NAME` length and characters, exact `PAPER_SIZE` match, empty
   `TZ`, `PUID`/`PGID` with leading zeros, system directories as `OUTPUT_DIR`.
 - An existing output directory's ownership is no longer changed at start.
+- A directory in the output folder with the same name as a new PDF no longer swallows it.
 - A Debian snakeoil TLS private key, identical in every copy of the image, is no longer
   shipped (CUPS didn't use it; it generates a per-container certificate).
 

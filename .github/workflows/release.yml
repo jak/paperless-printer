@@ -18,7 +18,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: release
+  # One group per tag/ref, so a second tag pushed while a release runs isn't dropped.
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -156,16 +157,20 @@ jobs:
 
   scan:
     needs: [resolve, build-candidate]
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: read
     steps:
-      - name: Trivy (fail on fixable HIGH/CRITICAL)
+      - name: Trivy ${{ matrix.platform }} (fail on fixable HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TRIVY_PLATFORM: ${{ matrix.platform }}
         with:
           image-ref: ${{ needs.build-candidate.outputs.image }}
           format: table
@@ -212,6 +217,10 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
         run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists (re-run); nothing to do."
+            exit 0
+          fi
           flags=(--verify-tag --generate-notes)
           [[ $PRERELEASE == true ]] && flags+=(--prerelease)
           gh release create "$TAG" "${flags[@]}" \
