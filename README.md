@@ -84,6 +84,9 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
   `vprint-mover`. If any of them dies the container exits, so your restart policy recovers it.
 - cups-pdf writes PDFs in place while Ghostscript runs, so they are staged first and published
   with an atomic rename. Consumers such as paperless never see a partial file.
+- cups-pdf ignores Ghostscript failures, so a wrapper (`vprint-gs`) flags them and the mover
+  logs `ERROR: PDF conversion failed for job N "Title"`. Without it, the job would show as
+  completed with no file.
 - cups-pdf 3.0.2 garbles titles it reads from PostScript, so the mover asks cupsd for each
   job's real title. Titles are sanitised: no path separators or control characters, at most
   100 bytes.
@@ -99,7 +102,11 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
   `426 Upgrade Required`, so the password never crosses the network unencrypted.
 - No credentials are baked into the image. Passwords are stored as SHA-512 hashes at runtime.
 - The compose examples drop all capabilities except the eight CUPS, cups-pdf and Avahi need,
-  and set `no-new-privileges`.
+  set `no-new-privileges`, and run with a **read-only root filesystem**. Runtime state lives on
+  tmpfs at `/run`, `/tmp` and `/var/spool`. Jobs are spooled in memory, which is fine for
+  documents; very large print jobs need corresponding RAM.
+- No TLS private key ships in the image: CUPS generates a self-signed certificate per
+  container on first use.
 - `CUPS_SERVER_ALIAS=*` is the default because CUPS otherwise rejects every Host header except
   `localhost`, including the container's own IP. It weakens CUPS's DNS-rebinding protection for
   the *read-only* pages; admin actions still need TLS plus credentials. If you know every name
@@ -115,6 +122,7 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
 | paperless doesn't pick up files | `PUID`/`PGID` must match paperless's `USERMAP_UID`/`USERMAP_GID`. Check with `ls -ln` on the consume directory. |
 | PDFs are greyscale | Make sure the client has colour turned on; v2 advertises colour support. Please report the client and OS. |
 | Poor OCR in paperless | Set `PAPERLESS_OCR_MODE=force` in paperless; printed PDFs often have a poor text layer. |
+| A job "completed" but no PDF appeared | Look for `PDF conversion failed` in `docker logs`; the message includes Ghostscript's error. |
 | Container keeps restarting | `docker logs`: configuration errors are explained and exit with code 64. |
 | Need more detail | `CUPS_LOG_LEVEL=debug` |
 

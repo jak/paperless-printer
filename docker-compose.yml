@@ -26,11 +26,14 @@ services:
       - cups_admin_password
     volumes:
       - ./output:/mnt/output
-    # Least privilege: these capabilities are all CUPS, cups-pdf and Avahi need.
+    # Least privilege: only the capabilities CUPS, cups-pdf and Avahi need.
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL, NET_BIND_SERVICE, SYS_CHROOT]
     security_opt:
       - no-new-privileges:true
+    # Read-only root filesystem; all runtime state lives in these tmpfs mounts.
+    read_only: true
+    tmpfs: [/run, /tmp, /var/spool]
 
 secrets:
   cups_admin_password:

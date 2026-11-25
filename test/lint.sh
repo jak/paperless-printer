@@ -13,6 +13,7 @@ shell_scripts=(
   rootfs/usr/local/bin/vprint-healthcheck
   rootfs/usr/local/bin/vprint-mover
   rootfs/usr/local/bin/vprint-postprocess
+  rootfs/usr/local/bin/vprint-gs
   test/smoke.sh
   test/lint.sh
 )

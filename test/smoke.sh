@@ -91,6 +91,10 @@ client lp -h "$SERVER:631" -d Paperless_Printer -U someguest -t "Colour Page" >/
 showpage
 PS
 
+# A document Ghostscript cannot convert (sent raw so it reaches cups-pdf unfiltered).
+printf '%%!PS-Adobe-3.0\nthis_is_not_an_operator\nshowpage\n' |
+  client lp -h "$SERVER:631" -d Paperless_Printer -o raw -t "Broken Doc" >/dev/null
+
 outputs() { in_server find /mnt/output -maxdepth 1 -type f -name '*.pdf' -printf '%f\n' | sort; }
 for _ in $(seq 1 60); do
   [[ $(outputs | wc -l) -ge 3 ]] && break
@@ -125,7 +129,16 @@ check "old default print/print is refused (401)" test "$(curl_code -k -u print:p
 check "HTTPS admin with configured creds works (200)" test "$(curl_code -k -u "admin:$ADMIN_PASSWORD" "https://$SERVER:631/admin/")" = 200
 check "LAN host names are accepted for printing (200)" test "$(curl_code -H 'Host: 192.168.1.50:631' "http://$SERVER:631/printers/")" = 200
 check "unauthenticated lpadmin is rejected" bash -c "! docker run --rm --network '$NET' --entrypoint '' '$IMAGE' lpadmin -h '$SERVER:631' -U nobody -p Evil -E -v file:/dev/null </dev/null >/dev/null 2>&1"
-check "no password material in image history" bash -c "! docker history --no-trunc '$IMAGE' | grep -qiE 'passwd|\\\$1\\\$|\\\$6\\\$'"
+# shellcheck disable=SC2016 # literal regex
+check "no password hashes in image history" bash -c "! docker history --no-trunc '$IMAGE' | grep -qE '[$][156y][$][A-Za-z0-9./]{4,}'"
+check "no private keys baked into the image" \
+  bash -c "[[ -z \$(docker run --rm --entrypoint '' '$IMAGE' find /etc/ssl/private /usr/local/share/vprint/dist/cups/ssl -type f) ]]"
+check "TLS certificate is generated per container" bash -c "docker exec '$SERVER' sh -c 'ls /etc/cups/ssl/*.crt' >/dev/null"
+
+check "failed conversions are reported in the log" \
+  bash -c "docker logs '$SERVER' 2>&1 | grep -q 'ERROR: PDF conversion failed for job [0-9]* \"Broken Doc\"'"
+check "failed conversions leave no files behind" \
+  bash -c "[[ -z \$(docker exec '$SERVER' find /mnt/output /var/spool/vprint -name '*Broken*') ]]"
 
 section "lifecycle"
 start=$(date +%s)

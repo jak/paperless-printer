@@ -21,15 +21,32 @@ RUN apt-get update \
       tini \
       tzdata \
  && rm -rf /var/lib/apt/lists/* \
+ # ssl-cert (a cups-daemon dependency) generates a snakeoil key pair at install time, which
+ # would be identical in every copy of this image. CUPS generates its own per-container cert.
+ && rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem \
  # Avahi: no D-Bus in the container; publish only our static service file.
  && sed -i 's/^#\?enable-dbus=.*/enable-dbus=no/' /etc/avahi/avahi-daemon.conf \
  && rm -f /etc/avahi/services/*.service \
  # CUPS: all logs to the container's stderr so they show up in `docker logs`.
  && sed -i -E 's#^(AccessLog|ErrorLog|PageLog) .*#\1 stderr#' /etc/cups/cups-files.conf \
- # Output owner. UID/GID are remapped at start from PUID/PGID.
+ && echo 'CacheDir /run/vprint/cache' >>/etc/cups/cups-files.conf \
+ # Account used by cups-pdf for anonymous jobs. Output ownership comes from PUID/PGID.
  && groupadd --gid 1000 vprint \
  && useradd --uid 1000 --gid vprint --no-create-home --home-dir /nonexistent \
-      --shell /usr/sbin/nologin vprint
+      --shell /usr/sbin/nologin vprint \
+ # Runtime-written state lives under /run so the root filesystem can be read-only:
+ # keep pristine copies in /usr/local/share/vprint/dist and symlink /etc to /run/vprint.
+ && dist=/usr/local/share/vprint/dist \
+ && mkdir -p "$dist/accounts/etc" \
+ && mv /etc/cups /etc/avahi "$dist/" \
+ && ln -s /run/vprint/etc/cups /etc/cups \
+ && ln -s /run/vprint/etc/avahi /etc/avahi \
+ && rm -f /etc/papersize && ln -s /run/vprint/etc/papersize /etc/papersize \
+ && cp /etc/login.defs "$dist/accounts/etc/" \
+ && for f in passwd group shadow gshadow; do \
+      mv "/etc/$f" "$dist/accounts/etc/$f" && ln -s "/run/vprint/accounts/etc/$f" "/etc/$f"; \
+    done \
+ && rm -f /etc/passwd- /etc/group- /etc/shadow- /etc/gshadow-
 
 COPY --chmod=0755 rootfs/usr/local/bin/ /usr/local/bin/
 COPY rootfs/etc/vprint/ /etc/vprint/

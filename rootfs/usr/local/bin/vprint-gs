@@ -1,0 +1,21 @@
+#!/bin/sh
+# Ghostscript wrapper used by cups-pdf (GhostScript setting). cups-pdf ignores Ghostscript's
+# exit status, so a failed conversion would otherwise look like a successful job with no PDF.
+# On failure, leave "<output>.failed" with Ghostscript's messages in the staging directory;
+# vprint-mover reports it in the container log. Runs as the job's user.
+out=
+for arg in "$@"; do
+  case $arg in
+    -sOutputFile=*) out=${arg#-sOutputFile=} ;;
+  esac
+done
+err=$(mktemp) || exit 1
+/usr/bin/gs "$@" 2>"$err"
+status=$?
+if [ "$status" -ne 0 ] && [ -n "$out" ]; then
+  { echo "exit status $status"; tail -n 5 "$err"; } >"$out.failed" 2>/dev/null
+  rm -f "$out"
+fi
+cat "$err" >&2
+rm -f "$err"
+exit "$status"

@@ -35,7 +35,8 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   cupsd, Avahi or the mover dies).
 - Logs from CUPS, cups-pdf and vprint in `docker logs`.
 - Compose examples for host networking, macvlan and paperless-ngx, with least-privilege
-  capabilities and `no-new-privileges`.
+  capabilities, `no-new-privileges` and a read-only root filesystem.
+- Failed PDF conversions are reported in the log instead of silently producing no file.
 - End-to-end smoke test and lint suite; CI on amd64 and arm64 with a weekly build; Trivy
   scanning; Dependabot; multi-arch images on GHCR with SBOM and provenance; weekly security
   rebuilds of the latest release.
@@ -48,6 +49,8 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   discovery mechanism.
 - Static printer UUID shared by every deployment.
 - Unbounded log files inside the container.
+- A Debian snakeoil TLS private key, identical in every copy of the image, is no longer
+  shipped (CUPS didn't use it; it generates a per-container certificate).
 
 ## 1.x
 

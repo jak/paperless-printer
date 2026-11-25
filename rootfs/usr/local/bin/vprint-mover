@@ -92,6 +92,14 @@ publish() {
 trap 'exit 0' TERM INT
 log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
 while :; do
+  for failed in "$VPRINT_STAGING_DIR"/*.failed; do
+    name=${failed##*/}
+    name=${name%.failed}
+    id=
+    [[ $name =~ -job_([0-9]+)\.pdf$ ]] && id=${BASH_REMATCH[1]}
+    log "ERROR: PDF conversion failed for job ${id:-?} \"$(job_title "${id:-0}")\"; no file was saved: $(tr '\n' ' ' <"$failed")"
+    rm -f "$failed" "${failed%.failed}" "${failed%.failed}.done"
+  done
   for marker in "$VPRINT_STAGING_DIR"/*.done; do
     src=${marker%.done}
     if [[ -f $src ]]; then

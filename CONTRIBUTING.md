@@ -8,11 +8,19 @@
 | `rootfs/usr/local/bin/vprint-entrypoint` | Validates env vars, renders config, supervises cupsd, Avahi and the mover |
 | `rootfs/usr/local/bin/vprint-mover` | Publishes finished PDFs atomically into `OUTPUT_DIR` with the right owner, mode and name |
 | `rootfs/usr/local/bin/vprint-postprocess` | cups-pdf hook that marks a PDF as finished |
+| `rootfs/usr/local/bin/vprint-gs` | Ghostscript wrapper that reports failed conversions |
 | `rootfs/usr/local/bin/vprint-healthcheck` | Docker `HEALTHCHECK` |
 | `rootfs/etc/vprint/templates/` | Config templates rendered with `envsubst` at start |
 | `test/smoke.sh` | End-to-end test: prints over IPP from a second container and checks the results |
 | `test/lint.sh` | hadolint, shellcheck, compose and XML validation |
 | `docs/adr/` | Architecture decisions |
+
+## Runtime state
+
+The root filesystem can be read-only. Everything written at runtime goes to `/run`, `/tmp` or
+`/var/spool`. `/etc/cups`, `/etc/avahi`, `/etc/papersize` and `/etc/{passwd,group,shadow,gshadow}`
+are symlinks into `/run/vprint`, seeded on each start from `/usr/local/share/vprint/dist`.
+Don't `apt-get install` in a derived image without restoring those first.
 
 ## Development loop
 
@@ -22,7 +30,7 @@ test/smoke.sh                # builds vprint:smoke and runs the end-to-end suite
 docker build -t vprint:dev . && docker run --rm -it -p 631:631 -e CUPS_ADMIN_PASSWORD=dev vprint:dev
 ```
 
-Every behaviour change needs a smoke-test check. CI runs lint, then the smoke test on amd64 and arm64 with default and hardened capabilities, then a Trivy scan.
+Every behaviour change needs a smoke-test check. CI runs lint, then the smoke test on amd64 and arm64 twice: with Docker's default settings, and hardened (minimal capabilities, `no-new-privileges`, read-only root). Then it runs a Trivy scan.
 
 ## Commits and releases
 

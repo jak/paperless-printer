@@ -6,6 +6,11 @@ set -euo pipefail
 
 readonly TEMPLATES=/etc/vprint/templates
 readonly RUN_DIR=/run/vprint
+# Everything written at runtime lives under /run (plus /var/spool and /tmp), so the image
+# also runs with a read-only root filesystem. /etc/cups, /etc/avahi, /etc/papersize and the
+# account files are build-time symlinks into $RUN_DIR, seeded from DIST_DIR on each start.
+readonly DIST_DIR=/usr/local/share/vprint/dist
+readonly ACCOUNTS_ROOT=$RUN_DIR/accounts
 export VPRINT_STAGING_DIR=/var/spool/vprint
 
 log() { printf 'vprint: %s\n' "$*" >&2; }
@@ -75,10 +80,23 @@ validate() {
   is_true "$CUPS_WEB_INTERFACE" || true
 }
 
-setup_users() {
-  groupmod --non-unique --gid "$PGID" vprint
-  usermod --non-unique --uid "$PUID" --gid "$PGID" vprint
+seed_runtime() {
+  local ssl=
+  # Keep CUPS's self-signed certificate across restarts of the same container.
+  [[ -d $RUN_DIR/etc/cups/ssl ]] && ssl=$(mktemp -d) && cp -a "$RUN_DIR/etc/cups/ssl/." "$ssl/"
+  rm -rf "$RUN_DIR"
+  mkdir -p "$RUN_DIR/etc" "$RUN_DIR/log" "$RUN_DIR/cache" "$ACCOUNTS_ROOT"
+  cp -a "$DIST_DIR/cups" "$DIST_DIR/avahi" "$RUN_DIR/etc/"
+  cp -a "$DIST_DIR/accounts/etc" "$ACCOUNTS_ROOT/"
+  if [[ -n $ssl ]]; then
+    cp -a "$ssl/." "$RUN_DIR/etc/cups/ssl/"
+    rm -rf "$ssl"
+  fi
+}
 
+setup_users() {
+  # The vprint account keeps uid 1000: output ownership is applied numerically from
+  # PUID/PGID by vprint-mover, so no account needs remapping.
   local password generated=
   password=$(read_secret CUPS_ADMIN_PASSWORD)
   if [[ -z $password ]]; then
@@ -86,10 +104,10 @@ setup_users() {
     generated=1
   fi
   if ! id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1; then
-    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+    useradd --prefix "$ACCOUNTS_ROOT" --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
       --groups lpadmin "$CUPS_ADMIN_USER"
   fi
-  printf '%s:%s\n' "$CUPS_ADMIN_USER" "$password" | chpasswd --crypt-method SHA512
+  printf '%s:%s\n' "$CUPS_ADMIN_USER" "$password" | chpasswd --prefix "$ACCOUNTS_ROOT" --crypt-method SHA512
   if [[ -n $generated ]]; then
     log "No CUPS_ADMIN_PASSWORD set; generated a one-off admin password for this start:"
     log "  user: $CUPS_ADMIN_USER  password: $password"
@@ -154,7 +172,6 @@ render_config() {
   fi
 
   # Runtime settings for vprint-mover.
-  mkdir -p "$RUN_DIR"
   {
     printf 'OUTPUT_DIR=%q\n' "$OUTPUT_DIR"
     printf 'PUID=%q\nPGID=%q\nUMASK=%q\n' "$PUID" "$PGID" "$UMASK"
@@ -173,11 +190,13 @@ prepare_dirs() {
     chown "$PUID:$PGID" "$OUTPUT_DIR" ||
       log "WARNING: could not chown $OUTPUT_DIR to $PUID:$PGID; files will still be owned by $PUID:$PGID"
   fi
-  # cups-pdf writes its log to /var/log/cups/cups-pdf-<queue>_log; send it to the container log.
-  mkdir -p /var/log/cups
-  ln -sf /proc/1/fd/2 /var/log/cups/cups-pdf_log
-  ln -sf /proc/1/fd/2 "/var/log/cups/cups-pdf-${PRINTER_ID}_log"
-  mkdir -p /run/cups /run/avahi-daemon
+  # cups-pdf writes its log to <Log>/cups-pdf-<queue>_log; send it to the container log.
+  ln -sf /proc/1/fd/2 "$RUN_DIR/log/cups-pdf_log"
+  ln -sf /proc/1/fd/2 "$RUN_DIR/log/cups-pdf-${PRINTER_ID}_log"
+  mkdir -p /run/cups /run/avahi-daemon /var/spool/cups/tmp
+  chown root:lp /var/spool/cups /var/spool/cups/tmp
+  chmod 0710 /var/spool/cups
+  chmod 1770 /var/spool/cups/tmp
   rm -f /run/avahi-daemon/pid
 }
 
@@ -195,6 +214,7 @@ main() {
   PPD_SOURCE=/usr/share/ppd/cups-pdf/CUPS-PDF_noopt.ppd
   [[ -r $PPD_SOURCE ]] || die "cups-pdf PPD not found at $PPD_SOURCE"
   validate
+  seed_runtime
   setup_users
   render_config
   prepare_dirs

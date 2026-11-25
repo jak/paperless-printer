@@ -22,6 +22,7 @@ env:
     --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETUID
     --cap-add SETGID --cap-add KILL --cap-add NET_BIND_SERVICE --cap-add SYS_CHROOT
     --security-opt no-new-privileges:true
+    --read-only --tmpfs /run --tmpfs /tmp --tmpfs /var/spool
 
 jobs:
   lint:
@@ -59,7 +60,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       - name: Smoke test (default capabilities)
         run: IMAGE=vprint:ci test/smoke.sh
-      - name: Smoke test (hardened, as in the compose examples)
+      - name: Smoke test (hardened + read-only, as in the compose examples)
         run: IMAGE=vprint:ci SERVER_ARGS="$HARDENED_ARGS" test/smoke.sh
       - name: Image size
         run: docker image ls vprint:ci --format 'vprint:ci ${{ matrix.arch }} {{.Size}}' | tee -a "$GITHUB_STEP_SUMMARY"
