@@ -29,8 +29,8 @@ cleanup() {
   if ((rc != 0 || failures != 0)) && docker inspect "$SERVER" >/dev/null 2>&1; then
     echo; echo "---- server logs ----"; docker logs "$SERVER" 2>&1 | tail -60
   fi
-  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" >/dev/null 2>&1 || true
-  docker volume rm -f "$VOL" >/dev/null 2>&1 || true
+  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-stuck" >/dev/null 2>&1 || true
+  docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   rm -f "${SECRET_FILE:-}"
 }
@@ -66,7 +66,7 @@ chmod 0644 "$SECRET_FILE"
 docker volume create "$VOL" >/dev/null
 docker run -d --name "$SERVER" --network "$NET" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} \
   -e CUPS_ADMIN_PASSWORD_FILE=/run/secrets/admin -v "$SECRET_FILE:/run/secrets/admin:ro" \
-  -e PRINTER_NAME="Smoke & Test Printer" \
+  -e PRINTER_NAME="Smoke & Test Printer" -e CUPS_ALLOW_FROM=@LOCAL \
   -e PUID=1234 -e PGID=2345 -e UMASK=0027 \
   -e PAPER_SIZE=Letter -e TZ=Europe/London \
   -v "$VOL:/mnt/output" "$IMAGE" >/dev/null
@@ -82,6 +82,7 @@ check "printer UUID is derived (not the old static one)" \
 
 section "print over the network"
 printf 'Hello from the smoke test\n' | client lp -h "$SERVER:631" -d Paperless_Printer -U someguest -t "Anon Job.txt" >/dev/null
+printf 'Odd title\n' | client lp -h "$SERVER:631" -d Paperless_Printer -U someguest -t 'Invoice, March "2024"' >/dev/null
 printf 'Known user job\n' | client lp -h "$SERVER:631" -d Paperless_Printer -U vprint -t "../Known/User" >/dev/null
 client lp -h "$SERVER:631" -d Paperless_Printer -U someguest -t "Colour Page" >/dev/null <<'PS'
 %!PS-Adobe-3.0
@@ -97,7 +98,7 @@ printf '%%!PS-Adobe-3.0\nthis_is_not_an_operator\nshowpage\n' |
 
 outputs() { in_server find /mnt/output -maxdepth 1 -type f -name '*.pdf' -printf '%f\n' | sort; }
 for _ in $(seq 1 60); do
-  [[ $(outputs | wc -l) -ge 3 ]] && break
+  [[ $(outputs | wc -l) -ge 4 ]] && break
   sleep 1
 done
 # Also wait for the broken job to be fully processed, so the staging checks below see a quiet spool.
@@ -108,7 +109,8 @@ done
 files=()
 while IFS= read -r f; do files+=("$f"); done < <(outputs)
 printf '  files: %s\n' "${files[@]:-<none>}"
-check "three PDFs were produced" test "${#files[@]}" -eq 3
+check "four PDFs were produced" test "${#files[@]}" -eq 4
+check "titles with commas and quotes are kept readable" bash -c "printf '%s\n' \"\$@\" | grep -qx 'Invoice, March _2024_-job_[0-9]*.pdf'" _ "${files[@]}"
 check "filenames use the job title + job id" bash -c "printf '%s\n' \"\$@\" | grep -qx 'Anon Job-job_[0-9]*.pdf'" _ "${files[@]}"
 check "path characters in titles are neutralised" bash -c "printf '%s\n' \"\$@\" | grep -qx '_Known_User-job_[0-9]*.pdf'" _ "${files[@]}"
 check "no partial or hidden files left behind" bash -c "[[ -z \$(docker exec '$SERVER' find /mnt/output -name '.*' -type f) ]]"
@@ -151,12 +153,45 @@ docker stop -t 20 "$SERVER" >/dev/null
 check "docker stop is graceful (<10s)" test $(($(date +%s) - start)) -lt 10
 check "exit code is 0 after stop" test "$(docker inspect -f '{{.State.ExitCode}}' "$SERVER")" = 0
 
-docker run -d --name "$SERVER-bad" -e PRINTER_ID="has space" "$IMAGE" >/dev/null
-sleep 3
-check "invalid config fails fast with non-zero exit" test "$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' "$SERVER-bad")" = "exited:64"
-check "invalid config explains the problem" bash -c "docker logs '$SERVER-bad' 2>&1 | grep -q 'PRINTER_ID must be'"
+# invalid_config DESCRIPTION EXPECTED_MESSAGE -e VAR=value...
+invalid_config() {
+  local desc=$1 msg=$2
+  shift 2
+  docker rm -f "$SERVER-bad" >/dev/null 2>&1 || true
+  docker run -d --name "$SERVER-bad" "$@" "$IMAGE" >/dev/null
+  docker wait "$SERVER-bad" >/dev/null
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  check "rejects $desc (exit 64 + message)" bash -c \
+    '[[ $(docker inspect -f "{{.State.ExitCode}}" "$1") == 64 ]] && docker logs "$1" 2>&1 | grep -qF -- "$2"' _ "$SERVER-bad" "$msg"
+}
+invalid_config "PRINTER_ID with a space" "PRINTER_ID must be" -e PRINTER_ID="has space"
+invalid_config "PRINTER_NAME over 63 bytes" "at most 63 bytes" -e PRINTER_NAME="$(printf 'N%.0s' $(seq 1 64))"
+invalid_config "'#' in PRINTER_NAME" "must not contain '#'" -e PRINTER_NAME="Room #2"
+invalid_config "regex-like PAPER_SIZE" "PAPER_SIZE 'A.' is not supported" -e PAPER_SIZE="A."
+invalid_config "empty TZ" "is not a known time zone" -e TZ=
+invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must be" -e OUTPUT_DIR=/
 
-docker run -d --name "$SERVER-sup" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x -e OUTPUT_LABEL=0 "$IMAGE" >/dev/null
+section "output directory handling"
+# An existing, populated directory (e.g. a host consume folder) must not be re-owned.
+docker volume create "$VOL-shared" >/dev/null
+docker run --rm -v "$VOL-shared:/d" --entrypoint '' "$IMAGE" sh -c 'touch /d/scanner-file && chown 4321:4321 /d /d/scanner-file'
+docker run -d --name "$SERVER-stuck" -e CUPS_ADMIN_PASSWORD=x -e PUID=1234 -v "$VOL-shared:/mnt/output" "$IMAGE" >/dev/null
+check "container with shared output dir healthy" wait_healthy "$SERVER-stuck"
+check "existing populated output dir keeps its owner" test "$(docker exec "$SERVER-stuck" stat -c %u /mnt/output)" = 4321
+docker rm -f "$SERVER-stuck" >/dev/null
+
+# A read-only output volume: jobs can't be published, so health must go bad (not silently pile up).
+docker volume create "$VOL-ro" >/dev/null
+docker run -d --name "$SERVER-stuck" -e CUPS_ADMIN_PASSWORD=x -e VPRINT_STUCK_SECONDS=3 \
+  -v "$VOL-ro:/mnt/output:ro" "$IMAGE" >/dev/null
+check "container with read-only output healthy at start" wait_healthy "$SERVER-stuck"
+printf 'stuck\n' | docker exec -i "$SERVER-stuck" lp -t "Stuck Job" >/dev/null
+sleep 8
+check "unwritable output dir makes the healthcheck fail" bash -c \
+  "! docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q healthy; docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'cannot be written'"
+check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&1 | grep -q 'cannot write to /mnt/output'"
+
+docker run -d --name "$SERVER-sup" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x -e OUTPUT_LABEL=0 -e PUID=08 "$IMAGE" >/dev/null
 check "second container (OUTPUT_LABEL=0) healthy" wait_healthy "$SERVER-sup"
 for n in 1 2; do
   printf 'same\n' | docker exec -i "$SERVER-sup" lp -t "Same Name" >/dev/null
@@ -166,6 +201,7 @@ for n in 1 2; do
     sleep 1
   done
 done
+check "PUID with a leading zero is read as decimal" test "$(docker exec "$SERVER-sup" stat -c %u "/mnt/output/Same Name.pdf")" = 8
 check "OUTPUT_LABEL=0 names by title and de-duplicates clashes" \
   test "$(docker exec "$SERVER-sup" ls /mnt/output | LC_ALL=C sort | tr '\n' '|')" = "Same Name-1.pdf|Same Name.pdf|"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
