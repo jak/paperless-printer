@@ -12,6 +12,9 @@ shopt -s nullglob dotglob
 . /run/vprint/env
 
 readonly POLL_SECONDS=${VPRINT_MOVER_POLL_SECONDS:-1}
+# Leftover temporary files older than this are from a crashed publisher. A live publish holds
+# its temporary file for milliseconds, so this never touches another container's in-flight copy.
+readonly PARTIAL_MAX_AGE_MIN=10
 mode=$(printf '%04o' $((0666 & ~8#${UMASK})))
 declare -A warned=()
 
@@ -87,9 +90,11 @@ output_name() {
 publish() {
   local src=$1 name tmp target
   name=$(output_name "${src##*/}")
-  tmp="$OUTPUT_DIR/.${name}.vprint-partial"
-  if ! install -o "$PUID" -g "$PGID" -m "$mode" "$src" "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
+  # A unique temporary file per publish (mktemp uses O_EXCL), so publishers sharing an output
+  # directory can never overwrite each other's copy before it is renamed into place.
+  if ! tmp=$(mktemp --suffix=.vprint-partial "$OUTPUT_DIR/.vprint-XXXXXXXXXX" 2>/dev/null) ||
+    ! install -o "$PUID" -g "$PGID" -m "$mode" "$src" "$tmp" 2>/dev/null; then
+    [[ -n ${tmp:-} ]] && rm -f "$tmp"
     if [[ -z ${warned[$src]:-} ]]; then
       log "cannot write to $OUTPUT_DIR (will keep retrying): $name"
       warned[$src]=1
@@ -106,12 +111,19 @@ publish() {
   log "saved ${target}"
 }
 
+# A crash mid-publish can leave a temporary file behind; it was never visible under its final
+# name and the source is still staged (if staging survived), so drop it once it is stale.
+sweep_partials() {
+  find "$OUTPUT_DIR" -maxdepth 1 -name '.*.vprint-partial' -type f -mmin "+$PARTIAL_MAX_AGE_MIN" \
+    -delete 2>/dev/null || true
+  next_sweep=$((SECONDS + PARTIAL_MAX_AGE_MIN * 60))
+}
+
 trap 'exit 0' TERM INT
-# A crash or restart mid-publish can leave a temporary file behind; it was never visible
-# under its final name and the source is still staged (if staging survived), so drop it.
-find "$OUTPUT_DIR" -maxdepth 1 -name '.*.vprint-partial' -type f -delete 2>/dev/null || true
+sweep_partials
 log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
 while :; do
+  ((SECONDS < next_sweep)) || sweep_partials
   for failed in "$VPRINT_STAGING_DIR"/*.failed; do
     name=${failed##*/}
     name=${name%.failed}

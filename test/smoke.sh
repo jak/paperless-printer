@@ -29,8 +29,8 @@ cleanup() {
   if ((rc != 0 || failures != 0)) && docker inspect "$SERVER" >/dev/null 2>&1; then
     echo; echo "---- server logs ----"; docker logs "$SERVER" 2>&1 | tail -60
   fi
-  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-stuck" >/dev/null 2>&1 || true
-  docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" >/dev/null 2>&1 || true
+  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" >/dev/null 2>&1 || true
+  docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   rm -f "${SECRET_FILE:-}"
 }
@@ -195,8 +195,34 @@ check "unwritable output dir makes the healthcheck fail" bash -c \
   "! docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q healthy; docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'cannot be written'"
 check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&1 | grep -q 'cannot write to /mnt/output'"
 
-docker run -d --name "$SERVER-sup" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x -e OUTPUT_LABEL=0 -e PUID=08 "$IMAGE" >/dev/null
+docker rm -f "$SERVER-stuck" >/dev/null
+
+# Two publishers sharing one output directory. Seed it with another writer's in-flight temporary
+# file (fresh) and a crash leftover (stale): start-up must only remove the stale one.
+docker volume create "$VOL-multi" >/dev/null
+docker run --rm -v "$VOL-multi:/d" --entrypoint '' "$IMAGE" sh -c \
+  'touch /d/.vprint-inflight.vprint-partial && touch -d "-1 hour" /d/.vprint-stale.vprint-partial'
+for s in sup sup2; do
+  docker run -d --name "$SERVER-$s" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x \
+    -e OUTPUT_LABEL=0 -e PUID=08 -v "$VOL-multi:/mnt/output" "$IMAGE" >/dev/null
+done
 check "second container (OUTPUT_LABEL=0) healthy" wait_healthy "$SERVER-sup"
+check "third container sharing the output dir healthy" wait_healthy "$SERVER-sup2"
+check "start-up removes stale temporary files only" test "$(docker exec "$SERVER-sup" sh -c 'ls -A /mnt/output' | tr '\n' '|')" = ".vprint-inflight.vprint-partial|"
+docker exec "$SERVER-sup" rm /mnt/output/.vprint-inflight.vprint-partial
+# Both containers publish same-titled jobs at once: every document must survive, de-duplicated.
+for i in 1 2 3 4 5; do
+  for s in sup sup2; do printf '%s %s\n' "$s" "$i" | docker exec -i "$SERVER-$s" lp -t "Race" >/dev/null & done
+done
+wait
+for _ in $(seq 1 60); do
+  (($(docker exec "$SERVER-sup" sh -c 'ls /mnt/output | wc -l') >= 10)) && break
+  sleep 1
+done
+check "concurrent publishers sharing a directory lose no documents" \
+  test "$(docker exec "$SERVER-sup" sh -c 'md5sum /mnt/output/Race*.pdf | cut -d" " -f1 | sort -u | wc -l; ls -A /mnt/output | grep -c partial')" = "$(printf '10\n0')"
+docker rm -f "$SERVER-sup2" >/dev/null
+docker exec "$SERVER-sup" sh -c 'rm -f /mnt/output/*'
 # A directory with the target's name must count as a clash, not as a place to move into.
 docker exec "$SERVER-sup" mkdir "/mnt/output/Dir Clash.pdf"
 printf 'dir\n' | docker exec -i "$SERVER-sup" lp -t "Dir Clash" >/dev/null
