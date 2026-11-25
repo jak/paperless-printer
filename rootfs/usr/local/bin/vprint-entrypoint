@@ -131,6 +131,7 @@ render_config() {
   export PRINTER_ID PRINTER_NAME PRINTER_LOCATION PRINTER_UUID PRINTER_NAME_XML PRINTER_LOCATION_XML \
     VPRINT_NOW VPRINT_ADMINURL_RECORD CUPS_WEB_INTERFACE CUPS_ALLOW_DIRECTIVES CUPS_SERVER_ALIAS \
     CUPS_LOG_LEVEL
+  # shellcheck disable=SC2016 # literal names: envsubst only substitutes the listed variables
   RENDER_VARS='$PRINTER_ID $PRINTER_NAME $PRINTER_LOCATION $PRINTER_UUID $PRINTER_NAME_XML $PRINTER_LOCATION_XML $VPRINT_NOW $VPRINT_ADMINURL_RECORD $CUPS_WEB_INTERFACE $CUPS_ALLOW_DIRECTIVES $CUPS_SERVER_ALIAS $CUPS_LOG_LEVEL $VPRINT_STAGING_DIR'
 
   render cupsd.conf /etc/cups/cupsd.conf
@@ -181,6 +182,7 @@ prepare_dirs() {
 }
 
 pids=()
+# shellcheck disable=SC2329 # invoked via trap
 shutdown() {
   log "stopping"
   trap - TERM INT

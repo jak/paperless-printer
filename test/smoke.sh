@@ -48,8 +48,8 @@ curl_code() { docker run --rm --network "$NET" "$CURL_IMAGE" -s -o /dev/null -w 
 in_server() { docker exec "$SERVER" "$@"; }
 
 wait_healthy() {
-  local name=$1 i status
-  for i in $(seq 1 60); do
+  local name=$1 status
+  for _ in $(seq 1 60); do
     status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}/{{.State.Status}}' "$name" 2>/dev/null || true)
     [[ $status == healthy/running ]] && return 0
     [[ $status == */exited ]] && return 1
