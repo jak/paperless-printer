@@ -39,6 +39,9 @@ make Bonjour discovery work. Other set-ups:
 Without discovery (e.g. a bridge network with `-p 631:631`), add the printer manually as
 `ipp://<host>:631/printers/Paperless_Printer`.
 
+**Image tags:** `2.0.0`, `2.0`, `2` and `latest` are rebuilt weekly with Debian security updates,
+so they are *mutable*. Pin `ghcr.io/jak/virtual-cups-printer@sha256:…` if you need a fixed image.
+
 ## Configuration
 
 Set these as environment variables; no rebuild is needed. Invalid values stop the container
@@ -46,20 +49,20 @@ at start with a clear message (exit code 64).
 
 | Variable | Default | Description |
 |---|---|---|
-| `PRINTER_NAME` | `Paperless Printer` | Name shown to clients |
+| `PRINTER_NAME` | `Paperless Printer` | Name shown to clients (at most 63 bytes, no `#`) |
 | `PRINTER_ID` | `Paperless_Printer` | CUPS queue name (letters, digits, `_`, `-`); used in the URL `/printers/<id>` |
 | `PRINTER_LOCATION` | *(empty)* | Location shown to clients |
 | `PRINTER_UUID` | *derived from `PRINTER_ID`* | Fixed UUID, if you need one |
 | `PAPER_SIZE` | `A4` | Default paper size, e.g. `A4`, `Letter`, `Legal`, `A5` |
 | `TZ` | `UTC` | Time zone for timestamps |
-| `OUTPUT_DIR` | `/mnt/output` | Where PDFs are written inside the container (mount a volume here) |
+| `OUTPUT_DIR` | `/mnt/output` | Where PDFs are written inside the container (mount a volume here). An existing directory's ownership is never changed; only a new or empty root-owned one (a fresh volume) is given to `PUID:PGID` |
 | `PUID` / `PGID` | `1000` / `1000` | Owner of the PDFs. Match the consumer (e.g. paperless `USERMAP_UID`/`USERMAP_GID`) |
 | `UMASK` | `0022` | Permission mask for PDFs (`0022` gives `0644`, `0027` gives `0640`, `0002` gives `0664`) |
-| `OUTPUT_LABEL` | `2` | File naming: `0` = `Title.pdf`, `1` = `job_7-Title.pdf`, `2` = `Title-job_7.pdf`. Name clashes get `-1`, `-2`, … |
+| `OUTPUT_LABEL` | `2` | File naming: `0` = `Title.pdf`, `1` = `job_7-Title.pdf`, `2` = `Title-job_7.pdf`. Name clashes get `-1`, `-2`, …; existing files are never overwritten. Job numbers restart when the container restarts ([#42](https://github.com/jak/virtual-cups-printer/issues/42)) |
 | `CUPS_ADMIN_USER` | `admin` | Admin user for the web UI and `lpadmin` |
 | `CUPS_ADMIN_PASSWORD_FILE` | | File holding the admin password (Docker secret, **preferred**) |
 | `CUPS_ADMIN_PASSWORD` | | Admin password. If neither is set, a random one is printed to the log at each start |
-| `CUPS_ALLOW_FROM` | `all` | Space-separated CUPS addresses allowed to connect, e.g. `@LOCAL 192.168.1.0/24` |
+| `CUPS_ALLOW_FROM` | `all` | Space-separated CUPS addresses allowed to connect, e.g. `@LOCAL 192.168.1.0/24`. The compose examples use `@LOCAL` (the container's own subnets); keep `all` or list subnets when using a bridge network with published ports, where LAN clients don't look local |
 | `CUPS_SERVER_ALIAS` | `*` | Host names clients may use. `*` is needed unless you list every name and IP (see [Security](#security)) |
 | `CUPS_WEB_INTERFACE` | `yes` | Set `no` to disable the web UI |
 | `CUPS_LOG_LEVEL` | `warn` | `error`, `warn`, `info`, `debug`, … |
@@ -90,14 +93,16 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
 - cups-pdf 3.0.2 garbles titles it reads from PostScript, so the mover asks cupsd for each
   job's real title. Titles are sanitised: no path separators or control characters, at most
   100 bytes.
-- `HEALTHCHECK` reports unhealthy if cupsd stops responding, the queue stops accepting jobs, or
-  a helper process dies.
+- `HEALTHCHECK` reports unhealthy if cupsd stops responding, the queue stops accepting jobs, a
+  helper process dies, or finished PDFs can't be written to `OUTPUT_DIR` for over a minute (e.g.
+  a full or read-only volume).
 - All logs (CUPS, cups-pdf, Avahi, vprint) go to `docker logs`.
 
 ## Security
 
-- Printing is anonymous, as with any network printer. Restrict who can reach it with your
-  network, or with `CUPS_ALLOW_FROM`.
+- Printing is anonymous, as with any network printer, so anyone who can reach port 631 can put
+  a document into the output folder. The compose examples therefore set
+  `CUPS_ALLOW_FROM=@LOCAL`. Firewall port 631 if the host is reachable from untrusted networks.
 - Administration requires the admin password **and** TLS. Over plain HTTP, CUPS answers
   `426 Upgrade Required`, so the password never crosses the network unencrypted.
 - No credentials are baked into the image. Passwords are stored as SHA-512 hashes at runtime.
@@ -121,7 +126,7 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
 | Docker host can't reach a macvlan printer | Expected: macvlan isolates the host from its children. See the shim commands in [`examples/macvlan`](examples/macvlan/docker-compose.yml). |
 | paperless doesn't pick up files | `PUID`/`PGID` must match paperless's `USERMAP_UID`/`USERMAP_GID`. Check with `ls -ln` on the consume directory. |
 | PDFs are greyscale | Make sure the client has colour turned on; v2 advertises colour support. Please report the client and OS. |
-| Poor OCR in paperless | Set `PAPERLESS_OCR_MODE=force` in paperless; printed PDFs often have a poor text layer. |
+| Poor OCR in paperless | Set `PAPERLESS_OCR_MODE=redo` (or `force`) in paperless (v3 values); printed PDFs often have a poor text layer. |
 | A job "completed" but no PDF appeared | Look for `PDF conversion failed` in `docker logs`; the message includes Ghostscript's error. |
 | Container keeps restarting | `docker logs`: configuration errors are explained and exit with code 64. |
 | Need more detail | `CUPS_LOG_LEVEL=debug` |

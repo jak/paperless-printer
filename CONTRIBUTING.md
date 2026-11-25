@@ -30,11 +30,11 @@ test/smoke.sh                # builds vprint:smoke and runs the end-to-end suite
 docker build -t vprint:dev . && docker run --rm -it -p 631:631 -e CUPS_ADMIN_PASSWORD=dev vprint:dev
 ```
 
-Every behaviour change needs a smoke-test check. CI runs lint, then the smoke test on amd64 and arm64 twice: with Docker's default settings, and hardened (minimal capabilities, `no-new-privileges`, read-only root). Then it runs a Trivy scan.
+Every behaviour change needs a smoke-test check. CI runs lint and, in parallel, builds the image and runs the smoke test on amd64 and arm64 twice: with Docker's default settings, and hardened (minimal capabilities, `no-new-privileges`, read-only root). A Trivy scan follows the build. The release workflow builds the multi-arch image once, runs the same gates against that exact image, and only then promotes its digest to the version tags.
 
 ## Commits and releases
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `feat!:`/`BREAKING CHANGE:`, `docs:`, `ci:`, `build(deps):`)
 - Add user-visible changes to `CHANGELOG.md` under **Unreleased**
-- Release: move the Unreleased notes under a new version heading, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`. The Release workflow runs the smoke test, publishes `ghcr.io/jak/virtual-cups-printer:{X.Y.Z,X.Y,X,latest}` for amd64 and arm64 with SBOM and provenance, and creates the GitHub release.
-- The same workflow rebuilds the latest release weekly, so Debian security fixes ship without a code change.
+- Release: move the Unreleased notes under a new version heading, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`. The Release workflow pushes a `candidate-<run>` image (amd64 + arm64, SBOM, provenance), runs lint, the smoke test (both modes, both architectures) and Trivy against it, then points `X.Y.Z` (plus `X.Y`, `X` and `latest` when it's the newest in that line) at the tested digest and creates the GitHub release. Candidate tags can be deleted from the package page.
+- The same workflow rebuilds the newest release weekly, so Debian security fixes ship without a code change. Version tags are therefore **mutable**; pin `image@sha256:…` for immutability.
