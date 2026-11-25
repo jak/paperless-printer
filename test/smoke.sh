@@ -147,6 +147,10 @@ check "symlinks planted in staging are not followed" bash -c \
 docker exec "$SERVER" sh -c 'd=/var/spool/vprint/.vprint-claim.smoketest && mkdir -m 0700 $d &&
   mkdir "$d/Odd-job_901.pdf" && : >"$d/Odd-job_901.pdf/x"'
 sleep 4
+docker exec -u 1000:1000 "$SERVER" sh -c 'mkdir /var/spool/vprint/.vprint-claim.planted && : >/var/spool/vprint/.vprint-claim.planted/junk.pdf'
+sleep 3
+check "a claim directory not created by the mover is removed" bash -c \
+  "! docker exec '$SERVER' test -e /var/spool/vprint/.vprint-claim.planted && ! docker exec '$SERVER' test -e /mnt/output/junk.pdf"
 check "a non-file in a claim directory is removed and logged once" bash -c \
   "! docker exec '$SERVER' test -e /var/spool/vprint/.vprint-claim.smoketest && [[ \$(docker logs '$SERVER' 2>&1 | grep -c 'not a regular file: Odd-job_901') == 1 ]]"
 check "staging directory is empty" bash -c "[[ -z \$(docker exec '$SERVER' find /var/spool/vprint -type f) ]]"
@@ -386,13 +390,14 @@ docker exec "$SERVER-sup" sh -c 'rm -f /mnt/output/Busy*.pdf'
 # must keep their title rather than become "untitled".
 printf 'long\n' | docker exec -i "$SERVER-sup" lp -t "$(printf 'Long%.0s' $(seq 1 70))" >/dev/null
 printf 'nl\n' | docker exec -i "$SERVER-sup" lp -t "$(printf 'Two\nLines')" >/dev/null
+printf 'ctl\n' | docker exec -i "$SERVER-sup" lp -t "$(printf 'Ctl\001Char')" >/dev/null
 for _ in $(seq 1 30); do
-  docker exec "$SERVER-sup" test -e "/mnt/output/Two Lines.pdf" && break
+  docker exec "$SERVER-sup" test -e "/mnt/output/Two Lines.pdf" -a -e "/mnt/output/Ctl Char.pdf" && break
   sleep 1
 done
-check "titles over 255 bytes or with a newline keep their title" bash -c \
-  "docker exec '$SERVER-sup' test -e '/mnt/output/Two Lines.pdf' && docker exec '$SERVER-sup' sh -c 'ls /mnt/output | grep -q ^LongLongLong' && ! docker exec '$SERVER-sup' sh -c 'ls /mnt/output | grep -q ^untitled'"
-docker exec "$SERVER-sup" sh -c 'rm -f /mnt/output/Long*.pdf "/mnt/output/Two Lines.pdf"'
+check "titles over 255 bytes or with control characters keep their title" bash -c \
+  "docker exec '$SERVER-sup' test -e '/mnt/output/Two Lines.pdf' -a -e '/mnt/output/Ctl Char.pdf' && docker exec '$SERVER-sup' sh -c 'ls /mnt/output | grep -q ^LongLongLong' && ! docker exec '$SERVER-sup' sh -c 'ls /mnt/output | grep -q ^untitled'"
+docker exec "$SERVER-sup" sh -c 'rm -f /mnt/output/Long*.pdf "/mnt/output/Two Lines.pdf" "/mnt/output/Ctl Char.pdf"'
 check "a same-named directory is treated as a clash" test -n "$(docker exec "$SERVER-sup" find "/mnt/output/Dir Clash-1.pdf" -type f)"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3

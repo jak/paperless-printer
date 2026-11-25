@@ -132,6 +132,8 @@ json_attr() {
   v=${v//\\\"/\"}
   v=${v//\\\//\/}
   v=${v//\\[nrtbf]/ }
+  # Other control characters: ipptool writes \ooo (octal); JSON's \uXXXX too. Spaces, as in sanitize.
+  v=$(sed -E 's/\\(u[0-9A-Fa-f]{4}|[0-7]{3})/ /g' <<<"$v")
   printf '%s' "${v//$'\x01'/\\}"
 }
 
@@ -183,7 +185,8 @@ output_name() {
   if [[ $staged =~ -job_([0-9]+)\.pdf$ ]]; then
     id=${BASH_REMATCH[1]}
   else
-    printf '%s' "$staged"
+    # Not cups-pdf's "<title>-job_<id>.pdf" (it always produces that): still a safe name.
+    printf '%s.pdf' "$(sanitize "$staged")"
     return
   fi
   title=$(job_title "$id") || return 1
@@ -214,8 +217,12 @@ publish() {
   local src=$1 name=${1##*/} tmp target rc
   # Claim directories are root's own (mode 0700), so what is checked here can't change before
   # it is copied. Staging is writable by every user in the container: never follow a symlink
-  # or anything else planted there, and ignore claim directories root didn't create.
-  [[ -d ${src%/*} && ! -L ${src%/*} && -O ${src%/*} ]] || return 0
+  # or anything else planted there; a claim directory root didn't create is removed.
+  if [[ ! -d ${src%/*} || -L ${src%/*} || ! -O ${src%/*} ]]; then
+    log "removing a claim directory not created by vprint-mover: $(sanitize "${src%/*}")"
+    rm -rf -- "${src%/*}"
+    return 0
+  fi
   if [[ ! -f $src || -L $src ]]; then
     log "ignoring a staged entry that is not a regular file: $(sanitize "$name")"
     rm -rf -- "$src" # inside root's own claim directory, so whatever it is can go
@@ -295,6 +302,7 @@ sweep() {
   find "$OUTPUT_DIR" -maxdepth 1 -name '.*.vprint-partial' -type f -mmin "+$PARTIAL_MAX_AGE_MIN" \
     -delete 2>/dev/null || true
   while IFS= read -r -d '' f; do
+    : >"$HEARTBEAT" # job_state can take seconds per file when cupsd is slow
     [[ -e $f.done || -e $f.failed ]] && continue
     # No marker yet: ask cupsd what happened to the job before deciding.
     case $(job_state "$f") in
