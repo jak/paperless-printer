@@ -4,11 +4,13 @@
 #
 # Usage: test/smoke.sh                 # builds vprint:smoke from the working tree
 #        IMAGE=ghcr.io/... test/smoke.sh   # tests an existing image (no build)
+#        SERVER_ARGS="--cap-drop ALL ..." test/smoke.sh   # extra `docker run` args for the server
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 IMAGE=${IMAGE:-}
+read -r -a SERVER_ARGS <<<"${SERVER_ARGS:-}"
 CURL_IMAGE=curlimages/curl:8.11.1
 RUN_ID="vprint-smoke-$$"
 NET=$RUN_ID
@@ -30,6 +32,7 @@ cleanup() {
   docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  rm -f "${SECRET_FILE:-}"
 }
 trap cleanup EXIT
 
@@ -57,9 +60,12 @@ wait_healthy() {
 
 section "start server"
 docker network create "$NET" >/dev/null
+SECRET_FILE=$(mktemp)
+printf '%s\n' "$ADMIN_PASSWORD" >"$SECRET_FILE"
+chmod 0644 "$SECRET_FILE"
 docker volume create "$VOL" >/dev/null
-docker run -d --name "$SERVER" --network "$NET" \
-  -e CUPS_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+docker run -d --name "$SERVER" --network "$NET" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} \
+  -e CUPS_ADMIN_PASSWORD_FILE=/run/secrets/admin -v "$SECRET_FILE:/run/secrets/admin:ro" \
   -e PRINTER_NAME="Smoke & Test Printer" \
   -e PUID=1234 -e PGID=2345 -e UMASK=0027 \
   -e PAPER_SIZE=Letter -e TZ=Europe/London \
@@ -132,7 +138,7 @@ sleep 3
 check "invalid config fails fast with non-zero exit" test "$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' "$SERVER-bad")" = "exited:64"
 check "invalid config explains the problem" bash -c "docker logs '$SERVER-bad' 2>&1 | grep -q 'PRINTER_ID must be'"
 
-docker run -d --name "$SERVER-sup" -e CUPS_ADMIN_PASSWORD=x "$IMAGE" >/dev/null
+docker run -d --name "$SERVER-sup" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x "$IMAGE" >/dev/null
 check "supervision test container healthy" wait_healthy "$SERVER-sup"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3
