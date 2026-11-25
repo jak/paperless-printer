@@ -60,6 +60,7 @@ read_secret() {
     # $(<file) strips trailing newlines, which secrets files usually end with.
     local v
     v=$(<"${!file_var}")
+    v=${v%$'\r'} # a file saved with Windows line endings
     # An empty file is a mistake (e.g. a `touch`ed secret), not a request for a random password.
     [[ -n $v ]] || die "$file_var points to an empty file"
     printf '%s' "$v"
@@ -84,10 +85,12 @@ validate() {
   (($(printf '%s' "$PRINTER_LOCATION" | wc -c) <= 127)) || die "PRINTER_LOCATION must be at most 127 bytes"
   [[ -z $PRINTER_UUID || ${PRINTER_UUID,,} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
     die "PRINTER_UUID must be a UUID like 2d1b6c3e-0d2f-4c6a-9f4e-7f0a1b2c3d4e"
-  [[ $PUID =~ ^[0-9]+$ && $PGID =~ ^[0-9]+$ ]] || die "PUID and PGID must be numeric"
+  # At most 10 digits so the arithmetic below can't overflow; then within the 32-bit id range.
+  [[ $PUID =~ ^[0-9]{1,10}$ && $PGID =~ ^[0-9]{1,10}$ ]] || die "PUID and PGID must be numeric (at most 4294967294)"
   # Force base 10 so values like 08 aren't parsed as (invalid) octal.
   PUID=$((10#$PUID)) PGID=$((10#$PGID))
   ((PUID != 0 && PGID != 0)) || die "PUID/PGID 0 (root) is not supported"
+  ((PUID <= 4294967294 && PGID <= 4294967294)) || die "PUID and PGID must be numeric (at most 4294967294)"
   [[ $UMASK =~ ^0?[0-7]{3}$ ]] || die "UMASK must be octal, e.g. 0022 (got '$UMASK')"
   (((8#$UMASK & 8#400) == 0)) || die "UMASK $UMASK would make the PDFs unreadable by their owner"
   [[ $OUTPUT_LABEL =~ ^[012]$ ]] || die "OUTPUT_LABEL must be 0, 1 or 2"

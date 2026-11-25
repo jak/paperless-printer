@@ -83,6 +83,8 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   `CUPS_SERVER_ALIAS`, and a `UMASK` that would make PDFs unreadable by their owner.
 - PDFs cut off mid-conversion (e.g. the container was killed) are removed from staging after an
   hour instead of piling up.
+- Output folders where root can't set file owners (SMB/CIFS shares, root-squashed NFS) still
+  receive PDFs; a warning explains that ownership and mode could not be applied.
 - Scheduled rebuilds can no longer move `latest`/`X`/`X.Y` back to an older release, and carry the
   release tag's commit as their revision.
 - A Debian snakeoil TLS private key, identical in every copy of the image, is no longer

@@ -32,7 +32,7 @@ cleanup() {
   docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" "$VOL-spool" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  [[ -z ${SECRET_FILE:-} ]] || rm -f "$SECRET_FILE" "$SECRET_FILE.cfg"
+  [[ -z ${SECRET_FILE:-} ]] || rm -f "$SECRET_FILE" "$SECRET_FILE.cfg" "$SECRET_FILE.share"
 }
 trap cleanup EXIT
 
@@ -207,6 +207,7 @@ invalid_config "an existing system account as admin" "is an existing system acco
 invalid_config "an existing group name as admin" "is an existing system account or group" -e CUPS_ADMIN_USER=staff
 invalid_config "an empty CUPS_SERVER_ALIAS" "CUPS_SERVER_ALIAS must not be empty" -e CUPS_SERVER_ALIAS=
 invalid_config "a UMASK that hides PDFs from their owner" "would make the PDFs unreadable" -e UMASK=0777
+invalid_config "a PUID beyond the 32-bit range" "at most 4294967294" -e PUID=99999999999999999999
 invalid_config "an empty admin password file" "points to an empty file" -e CUPS_ADMIN_PASSWORD_FILE=/dev/null
 invalid_config "a multi-line admin password" "must be a single line" -e CUPS_ADMIN_PASSWORD="$(printf 'one\nroot:two')"
 invalid_config "ADVERTISED_HOST with a port" "is not a valid IPv6 address" -e ADVERTISED_HOST=beef:631
@@ -223,6 +224,16 @@ check "allow-list entries are not glob-expanded" grep -qx '  Allow \*\.conf' "$S
 check "IPv6 ADVERTISED_HOST is bracketed in the admin URL" grep -qF 'adminurl=https://[fd00::12]:631/' "$SECRET_FILE.cfg"
 
 section "output directory handling"
+# A share where root can't set owners (SMB/CIFS, root-squashed NFS): simulated by running the
+# mover without CAP_CHOWN. The PDF must still be delivered, with one warning.
+docker run --rm --entrypoint bash "$IMAGE" -c '
+  mkdir -p /run/vprint /var/spool/vprint /mnt/output
+  printf "OUTPUT_DIR=/mnt/output\nPUID=1000\nPGID=1000\nUMASK=0022\nVPRINT_STAGING_DIR=/var/spool/vprint\nOUTPUT_LABEL=2\n" >/run/vprint/env
+  echo pdf >/var/spool/vprint/Plain.pdf && : >/var/spool/vprint/Plain.pdf.done
+  VPRINT_SCHEDULER_WAIT=0 timeout 5 setpriv --bounding-set=-chown --inh-caps=-chown vprint-mover
+  ls /mnt/output' >"$SECRET_FILE.share" 2>&1 || true
+check "files are still delivered where owners can't be set (with a warning)" bash -c \
+  "grep -qx Plain.pdf '$SECRET_FILE.share' && grep -q 'WARNING: cannot set owner' '$SECRET_FILE.share'"
 # An existing, populated directory (e.g. a host consume folder) must not be re-owned.
 docker volume create "$VOL-shared" >/dev/null
 docker run --rm -v "$VOL-shared:/d" --entrypoint '' "$IMAGE" sh -c 'touch /d/scanner-file && chown 4321:4321 /d /d/scanner-file'
@@ -245,7 +256,7 @@ check "container with read-only output healthy at start" wait_healthy "$SERVER-s
 printf 'first\n' | docker exec -i "$SERVER-stuck" lp -t "Stuck Job" >/dev/null
 sleep 8
 check "unwritable output dir makes the healthcheck fail" bash -c \
-  "! docker exec '$SERVER-stuck' vprint-healthcheck >/dev/null 2>&1 && docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'cannot be written'"
+  "! docker exec '$SERVER-stuck' vprint-healthcheck >/dev/null 2>&1 && docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'not being delivered: cannot write to /mnt/output'"
 check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&1 | grep -q 'cannot write to /mnt/output'"
 # Restart with cupsd's job history gone (as if purged): job ids start again at 1, so a new job
 # with the same title gets the same cups-pdf file name. The queued PDF must survive the restart,

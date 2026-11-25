@@ -19,8 +19,9 @@ alive /run/vprint/mover.pid || fail "vprint-mover is not running"
 # vprint-mover keeps mover.stuck while finished PDFs can't be published (e.g. the output volume
 # became read-only or full); jobs would pile up, so report it once it has lasted a while.
 older() { [[ -e $1 && -n $(find "$1" ! -newermt "-$2 seconds" 2>/dev/null) ]]; }
+# The marker holds vprint-mover's reason (an output problem, or cupsd not answering).
 ! older /run/vprint/mover.stuck "${VPRINT_STUCK_SECONDS:-60}" ||
-  fail "finished PDFs cannot be written to the output directory (see docker logs)"
+  fail "finished PDFs are not being delivered: $(head -c 300 /run/vprint/mover.stuck) (see docker logs)"
 ! older /run/vprint/mover.heartbeat 300 || fail "vprint-mover has stopped making progress"
 if [[ -e /run/vprint/avahi.pid ]]; then
   alive /run/vprint/avahi.pid || fail "avahi-daemon is not running"

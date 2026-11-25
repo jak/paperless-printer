@@ -23,16 +23,20 @@ readonly PARTIAL_MAX_AGE_MIN=10
 readonly ORPHAN_MAX_AGE_MIN=60
 mode=$(printf '%04o' $((0666 & ~8#${UMASK})))
 # Health signals for vprint-healthcheck: STUCK exists while some file can't be claimed or
-# published (its mtime is when that started); HEARTBEAT is touched every loop.
+# published and holds the reason (its mtime is when that started); HEARTBEAT is touched as
+# work progresses.
 readonly STUCK=/run/vprint/mover.stuck HEARTBEAT=/run/vprint/mover.heartbeat
 # Files that failed this pass / last pass (the latter so each problem is logged once).
 declare -A failing=() warned=()
+stuck_reason=
+ownership_warned=
 
 log() { printf 'vprint-mover: %s\n' "$*" >&2; }
 
 # Note a file that can't make progress; log the reason only when it first starts failing.
 blocked() {
   failing[$1]=1
+  stuck_reason=$2
   [[ -n ${warned[$1]:-} ]] || log "$2"
 }
 
@@ -162,10 +166,16 @@ publish() {
   # A unique temporary file per publish (mktemp uses O_EXCL), so publishers sharing an output
   # directory can never overwrite each other's copy before it is renamed into place.
   if ! tmp=$(mktemp --suffix=.vprint-partial "$OUTPUT_DIR/.vprint-XXXXXXXXXX" 2>/dev/null) ||
-    ! install -o "$PUID" -g "$PGID" -m "$mode" "$src" "$tmp" 2>/dev/null; then
+    ! cp -- "$src" "$tmp" 2>/dev/null; then
     [[ -n ${tmp:-} ]] && rm -f "$tmp"
     blocked "$src" "cannot write to $OUTPUT_DIR (will keep retrying): $name"
     return 1
+  fi
+  # Owner and mode are best effort: SMB/CIFS shares and root-squashed NFS refuse them, and the
+  # file is still worth delivering (it gets the share's own owner and permissions).
+  if ! { chown "$PUID:$PGID" "$tmp" && chmod "$mode" "$tmp"; } 2>/dev/null && [[ -z $ownership_warned ]]; then
+    log "WARNING: cannot set owner ${PUID}:${PGID} / mode ${mode} on files in $OUTPUT_DIR (e.g. a network share); they keep the filesystem's defaults"
+    ownership_warned=1
   fi
   target=$(place "$tmp" "$name")
   rc=$?
@@ -211,7 +221,7 @@ PRIVATE=$(mktemp -d "$VPRINT_STAGING_DIR/.vprint-private.XXXXXXXX") || exit 1
 : >"$HEARTBEAT"
 rm -f "$STUCK"
 # Titles come from cupsd, so give it a moment to come up before claiming anything.
-for _ in $(seq 1 30); do
+for _ in $(seq 1 "${VPRINT_SCHEDULER_WAIT:-30}"); do
   stop_if_asked
   scheduler_up && break
   sleep 1
@@ -268,7 +278,7 @@ while :; do
   for f in "${!failing[@]}"; do warned[$f]=1; done
   failing=()
   if ((${#warned[@]})); then
-    [[ -e $STUCK ]] || : >"$STUCK"
+    [[ -e $STUCK ]] || printf '%s\n' "$stuck_reason" >"$STUCK"
   else
     rm -f "$STUCK"
   fi
