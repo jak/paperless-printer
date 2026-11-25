@@ -138,8 +138,18 @@ sleep 3
 check "invalid config fails fast with non-zero exit" test "$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' "$SERVER-bad")" = "exited:64"
 check "invalid config explains the problem" bash -c "docker logs '$SERVER-bad' 2>&1 | grep -q 'PRINTER_ID must be'"
 
-docker run -d --name "$SERVER-sup" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x "$IMAGE" >/dev/null
-check "supervision test container healthy" wait_healthy "$SERVER-sup"
+docker run -d --name "$SERVER-sup" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x -e OUTPUT_LABEL=0 "$IMAGE" >/dev/null
+check "second container (OUTPUT_LABEL=0) healthy" wait_healthy "$SERVER-sup"
+for n in 1 2; do
+  printf 'same\n' | docker exec -i "$SERVER-sup" lp -t "Same Name" >/dev/null
+  # Wait for job n to be published before sending the next, so the clash is deterministic.
+  for _ in $(seq 1 30); do
+    (($(docker exec "$SERVER-sup" sh -c 'ls /mnt/output | wc -l') >= n)) && break
+    sleep 1
+  done
+done
+check "OUTPUT_LABEL=0 names by title and de-duplicates clashes" \
+  test "$(docker exec "$SERVER-sup" ls /mnt/output | LC_ALL=C sort | tr '\n' '|')" = "Same Name-1.pdf|Same Name.pdf|"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3
 check "container exits when a supervised process dies" test "$(docker inspect -f '{{.State.Status}}' "$SERVER-sup")" = exited
