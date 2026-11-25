@@ -365,7 +365,9 @@ while :; do
     # is not genuine (the owner can't tell: anonymous jobs share one user). Ignore it, so a
     # planted report can't make root delete a PDF that is still being written.
     pdf=${failed%.failed}
-    if [[ ! -f $report || -L $report || -e $pdf || -L $pdf ]]; then
+    # A genuine report is a fresh file: one link. A hard link to another file (possible only
+    # where the host allows it, fs.protected_hardlinks=0) must not get root to read it.
+    if [[ ! -f $report || -L $report || $(stat -c %h "$report") != 1 || -e $pdf || -L $pdf ]]; then
       log "ignoring a failure report not written for this job: $(sanitize "${failed##*/}")"
       rm -rf "$report"
       continue

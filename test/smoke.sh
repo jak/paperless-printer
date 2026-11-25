@@ -134,7 +134,8 @@ for _ in $(seq 1 15); do
   sleep 1
 done
 # Markers forged by another user must not make root publish a PDF still being written, or
-# delete one: only cups-pdf's (root's) markers count.
+# delete one: a .done counts only when it has the PDF's owner, and a .failed only when its PDF
+# is already gone (vprint-gs removes it before reporting).
 docker exec "$SERVER" sh -c 'echo partial >/var/spool/vprint/Victim-job_950.pdf'
 docker exec -u 1000:1000 "$SERVER" sh -c 'cd /var/spool/vprint && : >Victim-job_950.pdf.failed && : >Victim-job_950.pdf.done'
 sleep 3
