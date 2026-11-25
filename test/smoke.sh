@@ -79,6 +79,10 @@ check "PPD default paper size follows PAPER_SIZE" \
   bash -c "docker exec '$SERVER' grep -q '^\*DefaultPageSize: Letter' /etc/cups/ppd/Paperless_Printer.ppd"
 check "printer UUID is derived (not the old static one)" \
   bash -c "! docker exec '$SERVER' grep -q b5105127 /etc/cups/printers.conf"
+in_server cupsreject Paperless_Printer
+check "healthcheck fails while the queue rejects jobs" bash -c "! docker exec '$SERVER' vprint-healthcheck >/dev/null 2>&1"
+in_server cupsaccept Paperless_Printer
+check "healthcheck passes again once the queue accepts jobs" docker exec "$SERVER" vprint-healthcheck
 
 section "print over the network"
 printf 'Hello from the smoke test\n' | client lp -h "$SERVER:631" -d Paperless_Printer -U someguest -t "Anon Job.txt" >/dev/null
