@@ -132,6 +132,14 @@ for _ in $(seq 1 15); do
   docker exec "$SERVER" sh -c 'ls -A /var/spool/vprint | grep -qi leak' || break
   sleep 1
 done
+# Markers forged by another user must not make root publish a PDF still being written, or
+# delete one: only cups-pdf's (root's) markers count.
+docker exec "$SERVER" sh -c 'echo partial >/var/spool/vprint/Victim-job_950.pdf'
+docker exec -u 1000:1000 "$SERVER" sh -c 'cd /var/spool/vprint && : >Victim-job_950.pdf.failed && : >Victim-job_950.pdf.done'
+sleep 3
+check "forged markers neither publish nor delete another job's PDF" bash -c \
+  "docker exec '$SERVER' test -f /var/spool/vprint/Victim-job_950.pdf && ! docker exec '$SERVER' sh -c 'ls /mnt/output | grep -q Victim' && ! docker logs '$SERVER' 2>&1 | grep -q 'conversion failed for job 950'"
+docker exec "$SERVER" rm -f /var/spool/vprint/Victim-job_950.pdf
 check "symlinks planted in staging are not followed" bash -c \
   "! docker logs '$SERVER' 2>&1 | grep -q 'admin:\\\$' && ! docker exec '$SERVER' grep -rqs 'admin:' /mnt/output && ! docker exec '$SERVER' sh -c 'ls -A /var/spool/vprint | grep -qi leak'"
 # Something other than a file inside a claim directory (e.g. swapped in while the claim waited
@@ -201,6 +209,7 @@ invalid_config "PRINTER_NAME over 63 bytes" "at most 63 bytes" -e PRINTER_NAME="
 invalid_config "'#' in PRINTER_NAME" "must not contain '#'" -e PRINTER_NAME="Room #2"
 invalid_config "regex-like PAPER_SIZE" "PAPER_SIZE 'A.' is not supported" -e PAPER_SIZE="A."
 invalid_config "empty TZ" "is not a known time zone" -e TZ=
+invalid_config "a zoneinfo table as TZ" "is not a known time zone" -e TZ=zone.tab
 invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/
 invalid_config "OUTPUT_DIR escaping via .." "OUTPUT_DIR must not be" -e OUTPUT_DIR=/mnt/../etc/x
 invalid_config "an existing system account as admin" "is an existing system account" -e CUPS_ADMIN_USER=nobody
@@ -259,7 +268,7 @@ sleep 8
 check "unwritable output dir makes the healthcheck fail" bash -c \
   "! docker exec '$SERVER-stuck' vprint-healthcheck >/dev/null 2>&1 && docker exec '$SERVER-stuck' vprint-healthcheck 2>&1 | grep -q 'not being delivered: cannot write to /mnt/output'"
 check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&1 | grep -q 'cannot write to /mnt/output'"
-# Restart with cupsd's job history gone (as if purged): job ids start again at 1, so a new job
+# Restart with cupsd's job history and job.cache gone (as if lost): job ids start again at 1, so a new job
 # with the same title gets the same cups-pdf file name. The queued PDF must survive the restart,
 # keep its title, and not be overwritten by the new job.
 tls_cert() { docker exec "$SERVER-stuck" sh -c 'lpstat -E -h localhost:631 -r >/dev/null; cat /var/spool/cups-tls/*.crt' | md5sum; }
@@ -268,7 +277,7 @@ cert_before=$(tls_cert)
 docker stop -t 5 "$SERVER-stuck" >/dev/null
 # Also leave an incomplete PDF from an interrupted conversion (no .done marker, long unchanged).
 docker run --rm -v "$VOL-spool:/var/spool" --entrypoint '' "$IMAGE" sh -c \
-  'rm -f /var/spool/cups/c* /var/spool/cups/d* && echo partial >/var/spool/vprint/Orphan-job_99.pdf && touch -d "-2 hours" /var/spool/vprint/Orphan-job_99.pdf'
+  'rm -f /var/spool/cups/c* /var/spool/cups/d* /var/spool/cups-cache/job.cache && echo partial >/var/spool/vprint/Orphan-job_99.pdf && touch -d "-2 hours" /var/spool/vprint/Orphan-job_99.pdf'
 docker start "$SERVER-stuck" >/dev/null
 for _ in $(seq 1 30); do
   (($(docker logs "$SERVER-stuck" 2>&1 | grep -c 'vprint-mover: watching') >= 2)) && break
@@ -287,6 +296,18 @@ check "queued PDF survives a restart and keeps its title" \
   test "$(claimed -printf '%f\n' | grep -cx 'Stuck Job-job_1.pdf')" = 2
 check "a reused job id does not overwrite the queued PDF" \
   test "$(claimed -exec md5sum {} + | cut -c1-32 | sort -u | wc -l | tr -d ' ')" = 2
+# A plain restart keeps job.cache (CacheDir is on the spool), so numbering continues.
+docker restart -t 5 "$SERVER-stuck" >/dev/null
+for _ in $(seq 1 30); do
+  (($(docker logs "$SERVER-stuck" 2>&1 | grep -c 'vprint-mover: watching') >= 3)) && break
+  sleep 1
+done
+printf 'third\n' | docker exec -i "$SERVER-stuck" lp -t "After Restart" >/dev/null
+for _ in $(seq 1 20); do
+  [[ -n $(claimed -name 'After Restart-job_*') ]] && break
+  sleep 1
+done
+check "job numbers continue across a restart" test "$(claimed -name 'After Restart-job_*' -printf '%f')" = "After Restart-job_2.pdf"
 
 docker rm -f "$SERVER-stuck" >/dev/null
 

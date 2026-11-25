@@ -77,6 +77,7 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - The healthcheck now detects a stopped scheduler and a disabled queue reliably, and only reports
   stuck output when publishing is actually failing (not during a burst of jobs).
 - PDFs finished while cupsd is starting wait for their title instead of being saved as `untitled`.
+- Job numbers continue across restarts while `/var/spool` is kept (CUPS's cache lives there too).
 - CUPS's self-signed certificate survives restarts (kept with the spool; a recreated container
   needs a fixed `hostname:` to keep it).
 - Clearer start-up errors for an admin name that is an existing group, an empty

@@ -113,7 +113,9 @@ validate() {
   case $CUPS_ADMIN_USER in
     root | vprint | lp | daemon | avahi) die "CUPS_ADMIN_USER must not be the system account '$CUPS_ADMIN_USER'" ;;
   esac
-  [[ -n $TZ && $TZ != *..* && -f /usr/share/zoneinfo/$TZ ]] || die "TZ '$TZ' is not a known time zone"
+  # Real zone files start with "TZif"; zoneinfo also holds tables such as zone.tab.
+  [[ -n $TZ && $TZ != *..* && -f /usr/share/zoneinfo/$TZ && $(head -c4 "/usr/share/zoneinfo/$TZ") == TZif ]] ||
+    die "TZ '$TZ' is not a known time zone"
   local sizes
   sizes=$(grep -oP '^\*PageSize \K[^/]+' "$PPD_SOURCE")
   grep -qxF -- "$PAPER_SIZE" <<<"$sizes" ||
@@ -124,7 +126,7 @@ validate() {
 
 seed_runtime() {
   rm -rf "$RUN_DIR"
-  mkdir -p "$RUN_DIR/etc" "$RUN_DIR/log" "$RUN_DIR/cache" "$ACCOUNTS_ROOT"
+  mkdir -p "$RUN_DIR/etc" "$RUN_DIR/log" "$ACCOUNTS_ROOT"
   cp -a "$DIST_DIR/cups" "$DIST_DIR/avahi" "$RUN_DIR/etc/"
   cp -a "$DIST_DIR/accounts/etc" "$ACCOUNTS_ROOT/"
 }
@@ -248,6 +250,8 @@ prepare_dirs() {
   install -d -m 1733 -o root -g lpadmin "$VPRINT_STAGING_DIR"
   # CUPS's TLS keychain (ServerKeychain); kept across restarts with the spool.
   install -d -m 0700 -o root -g lp /var/spool/cups-tls
+  # CUPS's CacheDir (job.cache keeps the next job number), kept with the spool.
+  install -d -m 0770 -o root -g lp /var/spool/cups-cache
   # Files are owned by PUID:PGID individually. The directory itself is only given that
   # owner when we create it, or when it is an empty root-owned directory (a fresh Docker
   # volume), so the consumer can delete files. An existing, populated or non-root-owned

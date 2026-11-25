@@ -33,7 +33,9 @@ RUN apt-get update \
  && rm -f /etc/avahi/services/*.service \
  # CUPS: all logs to the container's stderr so they show up in `docker logs`.
  && sed -i -E 's#^(AccessLog|ErrorLog|PageLog) .*#\1 stderr#' /etc/cups/cups-files.conf \
- && echo 'CacheDir /run/vprint/cache' >>/etc/cups/cups-files.conf \
+ # CacheDir holds job.cache (the next job number), so it lives with the spool: job numbers
+ # then never restart while /var/spool is kept, even if old job history is purged.
+ && echo 'CacheDir /var/spool/cups-cache' >>/etc/cups/cups-files.conf \
  # CUPS's self-signed certificate lives with the spool (a volume in the compose examples),
  # so it survives restarts and clients don't see a new certificate each time.
  && echo 'ServerKeychain /var/spool/cups-tls' >>/etc/cups/cups-files.conf \

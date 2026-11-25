@@ -33,6 +33,11 @@ ownership_warned=
 
 log() { printf 'vprint-mover: %s\n' "$*" >&2; }
 
+# same_owner A B: A and B (not followed if symlinks) belong to the same uid. A marker only counts
+# for the PDF it names when they match, so a forged marker can only affect files its creator
+# could already delete itself (staging is sticky).
+same_owner() { [[ $(stat -c %u -- "$1" 2>/dev/null) == "$(stat -c %u -- "$2" 2>/dev/null)" ]]; }
+
 # Note a file that can't make progress; log the reason only when it first starts failing.
 blocked() {
   failing[$1]=1
@@ -238,6 +243,9 @@ sweep() {
     log "removing an incomplete PDF left in staging by an interrupted conversion: $(sanitize "${f##*/}")"
     rm -f "$f"
   done < <(find "$VPRINT_STAGING_DIR" -maxdepth 1 -type f -name '*.pdf' -mmin "+$ORPHAN_MAX_AGE_MIN" -print0 2>/dev/null)
+  # Half-written failure reports from a vprint-gs that was killed before renaming them.
+  find "$VPRINT_STAGING_DIR" -maxdepth 1 -type f -name '*.failed.tmp' -mmin "+$ORPHAN_MAX_AGE_MIN" \
+    -delete 2>/dev/null || true
   next_sweep=$((SECONDS + PARTIAL_MAX_AGE_MIN * 60))
 }
 
@@ -276,8 +284,15 @@ while :; do
     report=$PRIVATE/report
     rm -rf "$report"
     mv -T "$failed" "$report" 2>/dev/null || continue
-    details="(unreadable report)"
-    [[ -f $report && ! -L $report ]] && details=$(head -c 2000 "$report" | tr -s '[:cntrl:]' ' ')
+    # vprint-gs removes the PDF before reporting, so a PDF still there must at least share the
+    # report's owner: another user's report must not make root delete it.
+    pdf=${failed%.failed}
+    if [[ ! -f $report || -L $report ]] || { [[ -e $pdf || -L $pdf ]] && ! same_owner "$report" "$pdf"; }; then
+      log "ignoring a failure report not written for this job: $(sanitize "${failed##*/}")"
+      rm -rf "$report"
+      continue
+    fi
+    details=$(head -c 2000 "$report" | tr -s '[:cntrl:]' ' ')
     # Titles and Ghostscript output are untrusted: sanitize so they can't forge log lines.
     log "ERROR: PDF conversion failed for job ${id:-?} \"$(sanitize "$(job_title "${id:-0}")")\"; no file was saved: $details"
     rm -rf "$report"
@@ -291,12 +306,17 @@ while :; do
       # cups-pdf never writes symlinks; something else planted it. Don't follow it.
       log "ignoring a staged entry that is not a regular file: $(sanitize "${src##*/}")"
       rm -f "$src" "$marker"
+    elif [[ -L $marker ]] || { [[ -e $src ]] && ! same_owner "$marker" "$src"; }; then
+      # A marker by someone other than the PDF's owner could point at a PDF that is still
+      # being written: drop the marker, leave the PDF to its real one.
+      log "ignoring a completion marker not written for this job: $(sanitize "${marker##*/}")"
+      rm -f "$marker"
     elif [[ -f $src ]]; then
       claim "$src"
       case $? in
         0) ;;
-        2) blocked "$src" "cupsd is not answering; ${src##*/} waits for its title (will keep retrying)" ;;
-        *) blocked "$src" "cannot claim ${src##*/} in staging (will keep retrying)" ;;
+        2) blocked "$src" "cupsd is not answering; $(sanitize "${src##*/}") waits for its title (will keep retrying)" ;;
+        *) blocked "$src" "cannot claim $(sanitize "${src##*/}") in staging (will keep retrying)" ;;
       esac
     else
       rm -f "$marker"

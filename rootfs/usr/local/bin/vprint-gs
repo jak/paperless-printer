@@ -2,7 +2,8 @@
 # Ghostscript wrapper used by cups-pdf (GhostScript setting). cups-pdf ignores Ghostscript's
 # exit status, so a failed conversion would otherwise look like a successful job with no PDF.
 # On failure, leave "<output>.failed" with Ghostscript's messages in the staging directory;
-# vprint-mover reports it in the container log. Runs as the job's user.
+# vprint-mover reports it in the container log. The report has the same owner as the PDF
+# (both are this job's), which is how vprint-mover tells genuine reports from planted ones.
 out=
 for arg in "$@"; do
   case $arg in

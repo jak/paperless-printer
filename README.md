@@ -137,6 +137,7 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
 | Poor OCR in paperless | Set `PAPERLESS_OCR_MODE=redo` (or `force`) in paperless (v3 values); printed PDFs often have a poor text layer. |
 | A job "completed" but no PDF appeared | Look for `PDF conversion failed` in `docker logs`; the message includes Ghostscript's error. |
 | Container keeps restarting | `docker logs`: configuration errors are explained and exit with code 64. |
+| `Unable to bind` / Avahi warns about another mDNS stack | With host networking the container needs port 631 and shares mDNS with the host: stop the host's own CUPS (`cups.service`) and Avahi, or use the [macvlan example](examples/macvlan) to give the printer its own IP. |
 | Need more detail | `CUPS_LOG_LEVEL=debug` |
 
 ## Upgrading from v1
