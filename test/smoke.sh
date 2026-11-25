@@ -208,6 +208,7 @@ invalid_config "an existing group name as admin" "is an existing system account 
 invalid_config "an empty CUPS_SERVER_ALIAS" "CUPS_SERVER_ALIAS must not be empty" -e CUPS_SERVER_ALIAS=
 invalid_config "a UMASK that hides PDFs from their owner" "would make the PDFs unreadable" -e UMASK=0777
 invalid_config "a PUID beyond the 32-bit range" "at most 4294967294" -e PUID=99999999999999999999
+invalid_config "a C1 control character in PRINTER_NAME" "without control characters" -e PRINTER_NAME="$(printf 'A\302\205B')"
 invalid_config "an empty admin password file" "points to an empty file" -e CUPS_ADMIN_PASSWORD_FILE=/dev/null
 invalid_config "a multi-line admin password" "must be a single line" -e CUPS_ADMIN_PASSWORD="$(printf 'one\nroot:two')"
 invalid_config "ADVERTISED_HOST with a port" "is not a valid IPv6 address" -e ADVERTISED_HOST=beef:631
@@ -338,6 +339,16 @@ for _ in $(seq 1 30); do
 done
 check "only known document extensions are dropped from titles, without a trailing space" \
   docker exec "$SERVER-sup" test -e /mnt/output/example.com.pdf -a -e "/mnt/output/Quarterly Report.pdf" -a -e /mnt/output/Notes.pdf
+# A folder already holding NAME and NAME-1..NAME-99: the next one gets a time-based suffix.
+docker exec "$SERVER-sup" bash -c 'cd /mnt/output && touch Busy.pdf Busy-{1..99}.pdf'
+printf 'busy\n' | docker exec -i "$SERVER-sup" lp -t "Busy" >/dev/null
+for _ in $(seq 1 30); do
+  [[ -n $(docker exec "$SERVER-sup" find /mnt/output -regex '.*/Busy-[0-9]+-[0-9]+-[0-9]+\.pdf') ]] && break
+  sleep 1
+done
+check "after 99 clashes a time-based suffix is used" \
+  test -n "$(docker exec "$SERVER-sup" find /mnt/output -regex '.*/Busy-[0-9]+-[0-9]+-[0-9]+\.pdf')"
+docker exec "$SERVER-sup" sh -c 'rm -f /mnt/output/Busy*.pdf'
 check "a same-named directory is treated as a clash" test -n "$(docker exec "$SERVER-sup" find "/mnt/output/Dir Clash-1.pdf" -type f)"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3

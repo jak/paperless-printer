@@ -31,7 +31,9 @@ valid_ipv6() {
   [[ $s =~ ^[0-9A-Fa-f:]+$ && $s != *:::* && $s != *::*::* ]] || return 1
   [[ $s != :* || $s == ::* ]] && [[ $s != *: || $s == *:: ]] || return 1
   colons=${s//[^:]/}
-  ((${#colons} >= 2 && ${#colons} <= 7)) || return 1
+  # 2-7 colons; 8 only when "::" stands at either end (e.g. ::1:2:3:4:5:6:7).
+  ((${#colons} >= 2 && ${#colons} <= 8)) || return 1
+  ((${#colons} < 8)) || [[ $s == ::* || $s == *:: ]] || return 1
   IFS=: read -r -a groups <<<"$s"
   for g in "${groups[@]}"; do ((${#g} <= 4)) || return 1; done
   [[ $s == *::* ]] || ((${#colons} == 7))
@@ -70,6 +72,8 @@ read_secret() {
 }
 
 validate() {
+  # UTF-8 so [[:cntrl:]] also matches C1 controls (U+0080-U+009F), not only ASCII ones.
+  local LC_ALL=C.UTF-8
   [[ $PRINTER_ID =~ ^[A-Za-z0-9_-]{1,127}$ ]] ||
     die "PRINTER_ID must be 1-127 letters, digits, '_' or '-' (got '$PRINTER_ID')"
   local v
