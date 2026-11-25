@@ -231,9 +231,9 @@ docker run --rm --entrypoint bash "$IMAGE" -c '
   printf "OUTPUT_DIR=/mnt/output\nPUID=1000\nPGID=1000\nUMASK=0022\nVPRINT_STAGING_DIR=/var/spool/vprint\nOUTPUT_LABEL=2\n" >/run/vprint/env
   echo pdf >/var/spool/vprint/Plain.pdf && : >/var/spool/vprint/Plain.pdf.done
   VPRINT_SCHEDULER_WAIT=0 timeout 5 setpriv --bounding-set=-chown --inh-caps=-chown vprint-mover
-  ls /mnt/output' >"$SECRET_FILE.share" 2>&1 || true
-check "files are still delivered where owners can't be set (with a warning)" bash -c \
-  "grep -qx Plain.pdf '$SECRET_FILE.share' && grep -q 'WARNING: cannot set owner' '$SECRET_FILE.share'"
+  stat -c "%n %a" /mnt/output/*' >"$SECRET_FILE.share" 2>&1 || true
+check "files are still delivered, readable, where owners can't be set (with a warning)" bash -c \
+  "grep -qx '/mnt/output/Plain.pdf 644' '$SECRET_FILE.share' && grep -q 'WARNING: cannot set owner' '$SECRET_FILE.share'"
 # An existing, populated directory (e.g. a host consume folder) must not be re-owned.
 docker volume create "$VOL-shared" >/dev/null
 docker run --rm -v "$VOL-shared:/d" --entrypoint '' "$IMAGE" sh -c 'touch /d/scanner-file && chown 4321:4321 /d /d/scanner-file'

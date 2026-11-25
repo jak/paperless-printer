@@ -40,13 +40,25 @@ blocked() {
   [[ -n ${warned[$1]:-} ]] || log "$2"
 }
 
+# with_heartbeat CMD...: run CMD, keeping HEARTBEAT fresh meanwhile (a large copy to a slow
+# share can take longer than the healthcheck's limit).
+with_heartbeat() {
+  local keeper rc
+  (while kill -0 $$ 2>/dev/null; do : >"$HEARTBEAT"; sleep 10; done) </dev/null >/dev/null 2>&1 &
+  keeper=$!
+  "$@"
+  rc=$?
+  kill "$keeper" 2>/dev/null
+  return "$rc"
+}
+
 # lpstat -r exits 0 either way; only the text tells whether cupsd is up.
 scheduler_up() { [[ $(lpstat -r 2>/dev/null) == "scheduler is running" ]]; }
 
 # place TMP NAME: rename TMP into OUTPUT_DIR as NAME, or NAME-1, NAME-2... if taken.
 # --update=none-fail never replaces an existing file (atomic no-replace rename), so a file
 # created concurrently by another writer can't be clobbered. Prints the final path; on an
-# error other than a name clash, prints the error and returns 2.
+# error other than a name clash, prints the error and returns 2; returns 3 if TMP vanished.
 place() {
   local tmp=$1 name=$2 base ext n=0 target err retried=
   base=${name%.*}
@@ -55,7 +67,7 @@ place() {
   target="$OUTPUT_DIR/$name"
   # -T: never move into a directory that happens to have the target's name.
   until err=$(mv -T --update=none-fail "$tmp" "$target" 2>&1); do
-    [[ -e $tmp ]] || return 1
+    [[ -e $tmp ]] || return 3
     # Only an existing target is a clash; anything else (permissions, a filesystem without
     # no-replace renames) would fail the same way for every suffix.
     if [[ ! -e $target && ! -L $target ]]; then
@@ -166,14 +178,19 @@ publish() {
   # A unique temporary file per publish (mktemp uses O_EXCL), so publishers sharing an output
   # directory can never overwrite each other's copy before it is renamed into place.
   if ! tmp=$(mktemp --suffix=.vprint-partial "$OUTPUT_DIR/.vprint-XXXXXXXXXX" 2>/dev/null) ||
-    ! cp -- "$src" "$tmp" 2>/dev/null; then
+    ! with_heartbeat cp -- "$src" "$tmp" 2>/dev/null; then
     [[ -n ${tmp:-} ]] && rm -f "$tmp"
     blocked "$src" "cannot write to $OUTPUT_DIR (will keep retrying): $name"
     return 1
   fi
   # Owner and mode are best effort: SMB/CIFS shares and root-squashed NFS refuse them, and the
   # file is still worth delivering (it gets the share's own owner and permissions).
-  if ! { chown "$PUID:$PGID" "$tmp" && chmod "$mode" "$tmp"; } 2>/dev/null && [[ -z $ownership_warned ]]; then
+  # Each applied on its own: a share that refuses chown may still allow chmod, and the mode is
+  # what lets the consumer read the file (mktemp created it 0600).
+  local applied=1
+  chown "$PUID:$PGID" "$tmp" 2>/dev/null || applied=
+  chmod "$mode" "$tmp" 2>/dev/null || applied=
+  if [[ -z $applied && -z $ownership_warned ]]; then
     log "WARNING: cannot set owner ${PUID}:${PGID} / mode ${mode} on files in $OUTPUT_DIR (e.g. a network share); they keep the filesystem's defaults"
     ownership_warned=1
   fi
@@ -183,6 +200,8 @@ publish() {
     rm -f "$tmp"
     if ((rc == 2)); then
       blocked "$src" "cannot rename into $OUTPUT_DIR (will keep retrying): $target"
+    elif ((rc == 3)); then
+      blocked "$src" "the temporary copy of $name disappeared from $OUTPUT_DIR, e.g. removed by another container's clean-up (will retry)"
     else
       blocked "$src" "could not find a free file name for $name (will keep retrying)"
     fi
@@ -232,6 +251,7 @@ find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name "${CLAIM_PREFIX
 log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
 while :; do
   stop_if_asked
+  stuck_reason=
   ((SECONDS < next_sweep)) || sweep
   for failed in "$VPRINT_STAGING_DIR"/*.failed; do
     name=${failed##*/}
@@ -249,6 +269,8 @@ while :; do
     log "ERROR: PDF conversion failed for job ${id:-?} \"$(sanitize "$(job_title "${id:-0}")")\"; no file was saved: $details"
     rm -rf "$report"
     rm -f "${failed%.failed}" "${failed%.failed}.done"
+    : >"$HEARTBEAT"
+    stop_if_asked
   done
   for marker in "$VPRINT_STAGING_DIR"/*.done; do
     src=${marker%.done}
@@ -278,7 +300,10 @@ while :; do
   for f in "${!failing[@]}"; do warned[$f]=1; done
   failing=()
   if ((${#warned[@]})); then
-    [[ -e $STUCK ]] || printf '%s\n' "$stuck_reason" >"$STUCK"
+    # Keep the reason current, but the mtime of when being stuck started.
+    printf '%s\n' "$stuck_reason" >"$STUCK.new"
+    [[ ! -e $STUCK ]] || touch -r "$STUCK" "$STUCK.new"
+    mv -f "$STUCK.new" "$STUCK"
   else
     rm -f "$STUCK"
   fi

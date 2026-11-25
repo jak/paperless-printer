@@ -18,7 +18,9 @@ err=$(mktemp 2>/dev/null) || err=
 keeper=
 if [ -n "$out" ]; then
   # Short sleeps and no inherited output: once killed, nothing lingers holding cups-pdf's pipes.
-  (n=0; while sleep 5; do
+  # $$ is this wrapper even inside the subshell: stop as soon as it is gone, however it ended
+  # (a cancelled job may kill it before it reaches the kill below).
+  (n=0; while sleep 5 && kill -0 $$ 2>/dev/null; do
     n=$((n + 1))
     [ $((n % 60)) -ne 0 ] || touch -c "$out" 2>/dev/null
   done) </dev/null >/dev/null 2>&1 &
