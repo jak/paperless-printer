@@ -56,26 +56,40 @@ validate() {
   [[ $PRINTER_ID =~ ^[A-Za-z0-9_-]{1,127}$ ]] ||
     die "PRINTER_ID must be 1-127 letters, digits, '_' or '-' (got '$PRINTER_ID')"
   local v
+  # cupsd treats '#' as a comment start (truncating Info/Location), control characters
+  # break the Avahi XML, and DNS-SD limits a service name to 63 bytes (Avahi silently drops
+  # longer ones) and each TXT record to 255 bytes.
   for v in PRINTER_NAME PRINTER_LOCATION; do
-    [[ ${!v} != *$'\n'* ]] || die "$v must be a single line"
+    [[ ${!v} != *[[:cntrl:]]* ]] || die "$v must be a single line without control characters"
+    [[ ${!v} != *'#'* ]] || die "$v must not contain '#'"
   done
   [[ -n $PRINTER_NAME ]] || die "PRINTER_NAME must not be empty"
+  (($(printf '%s' "$PRINTER_NAME" | wc -c) <= 63)) || die "PRINTER_NAME must be at most 63 bytes (DNS-SD limit)"
+  (($(printf '%s' "$PRINTER_LOCATION" | wc -c) <= 127)) || die "PRINTER_LOCATION must be at most 127 bytes"
   [[ -z $PRINTER_UUID || ${PRINTER_UUID,,} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
     die "PRINTER_UUID must be a UUID like 2d1b6c3e-0d2f-4c6a-9f4e-7f0a1b2c3d4e"
   [[ $PUID =~ ^[0-9]+$ && $PGID =~ ^[0-9]+$ ]] || die "PUID and PGID must be numeric"
+  # Force base 10 so values like 08 aren't parsed as (invalid) octal.
+  PUID=$((10#$PUID)) PGID=$((10#$PGID))
   ((PUID != 0 && PGID != 0)) || die "PUID/PGID 0 (root) is not supported"
   [[ $UMASK =~ ^0?[0-7]{3}$ ]] || die "UMASK must be octal, e.g. 0022 (got '$UMASK')"
   [[ $OUTPUT_LABEL =~ ^[012]$ ]] || die "OUTPUT_LABEL must be 0, 1 or 2"
-  [[ $OUTPUT_DIR == /* ]] || die "OUTPUT_DIR must be an absolute path"
+  [[ $OUTPUT_DIR == /?* && $OUTPUT_DIR != *[[:cntrl:]]* ]] || die "OUTPUT_DIR must be an absolute path other than /"
+  case ${OUTPUT_DIR%/} in
+    /bin | /boot | /dev | /etc | /lib | /proc | /run | /sbin | /sys | /usr | /var | /var/spool | /var/spool/vprint | /etc/* | /usr/* | /proc/* | /sys/* | /dev/*)
+      die "OUTPUT_DIR must not be a system directory (got '$OUTPUT_DIR')" ;;
+  esac
   [[ $CUPS_LOG_LEVEL =~ ^(none|emerg|alert|crit|error|warn|notice|info|debug|debug2)$ ]] ||
     die "CUPS_LOG_LEVEL must be a CUPS LogLevel (warn, info, debug, ...)"
   [[ $CUPS_ADMIN_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "CUPS_ADMIN_USER is not a valid user name"
   case $CUPS_ADMIN_USER in
     root | vprint | lp | daemon | avahi) die "CUPS_ADMIN_USER must not be the system account '$CUPS_ADMIN_USER'" ;;
   esac
-  [[ -e /usr/share/zoneinfo/$TZ ]] || die "TZ '$TZ' is not a known time zone"
-  grep -q "^\*PageSize ${PAPER_SIZE}/" "$PPD_SOURCE" ||
-    die "PAPER_SIZE '$PAPER_SIZE' is not supported; choose one of: $(grep -oP '^\*PageSize \K[^/]+' "$PPD_SOURCE" | tr '\n' ' ')"
+  [[ -n $TZ && $TZ != *..* && -f /usr/share/zoneinfo/$TZ ]] || die "TZ '$TZ' is not a known time zone"
+  local sizes
+  sizes=$(grep -oP '^\*PageSize \K[^/]+' "$PPD_SOURCE")
+  grep -qxF -- "$PAPER_SIZE" <<<"$sizes" ||
+    die "PAPER_SIZE '$PAPER_SIZE' is not supported; choose one of: $(tr '\n' ' ' <<<"$sizes")"
   is_true "$AVAHI_ENABLED" || true
   is_true "$CUPS_WEB_INTERFACE" || true
 }
@@ -185,10 +199,14 @@ render_config() {
 prepare_dirs() {
   # Staging is shared by every job user (sticky, like /tmp); only vprint-mover (root) reads it.
   install -d -m 1733 -o root -g lpadmin "$VPRINT_STAGING_DIR"
-  mkdir -p "$OUTPUT_DIR"
-  if [[ $(stat -c '%u:%g' "$OUTPUT_DIR") != "$PUID:$PGID" ]]; then
-    chown "$PUID:$PGID" "$OUTPUT_DIR" ||
-      log "WARNING: could not chown $OUTPUT_DIR to $PUID:$PGID; files will still be owned by $PUID:$PGID"
+  # Files are owned by PUID:PGID individually. The directory itself is only given that
+  # owner when we create it, or when it is an empty root-owned directory (a fresh Docker
+  # volume), so the consumer can delete files. An existing, populated or non-root-owned
+  # directory (e.g. a host consume folder shared with a scanner) is never re-owned.
+  if [[ ! -d $OUTPUT_DIR ]]; then
+    install -d -o "$PUID" -g "$PGID" -m 0775 "$OUTPUT_DIR"
+  elif [[ $(stat -c '%u' "$OUTPUT_DIR") == 0 && -z $(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+    chown "$PUID:$PGID" "$OUTPUT_DIR" 2>/dev/null || true
   fi
   # cups-pdf writes its log to <Log>/cups-pdf-<queue>_log; send it to the container log.
   ln -sf /proc/1/fd/2 "$RUN_DIR/log/cups-pdf_log"

@@ -11,6 +11,10 @@ lpstat -r >/dev/null 2>&1 || fail "cupsd is not responding"
 lpstat -a "$PRINTER_ID" 2>/dev/null | grep -q "accepting requests" || fail "queue $PRINTER_ID is not accepting jobs"
 ! lpstat -p "$PRINTER_ID" 2>/dev/null | grep -q disabled || fail "queue $PRINTER_ID is disabled"
 alive /run/vprint/mover.pid || fail "vprint-mover is not running"
+# A finished PDF still waiting in staging means it cannot be published (e.g. the output
+# volume became read-only or full). Jobs would pile up in memory, so report it.
+stuck=$(find /var/spool/vprint -maxdepth 1 -name '*.done' ! -newermt "-${VPRINT_STUCK_SECONDS:-60} seconds" -print -quit 2>/dev/null)
+[[ -z $stuck ]] || fail "finished PDFs cannot be written to the output directory (see docker logs)"
 if [[ -e /run/vprint/avahi.pid ]]; then
   alive /run/vprint/avahi.pid || fail "avahi-daemon is not running"
 fi
