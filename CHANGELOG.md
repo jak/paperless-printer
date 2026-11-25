@@ -28,6 +28,8 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - **The compose examples keep `/var/spool` in a named volume**, so queued PDFs and job numbers
   survive restarts. Existing compose files with `tmpfs: [..., /var/spool]` keep working but
   lose queued PDFs on restart.
+- **The image no longer declares `VOLUME /mnt/output`.** Mount your output directory
+  explicitly (all examples do); a warning is logged when `OUTPUT_DIR` is not on a mounted volume.
 - **`CUPS_ADMIN_USER` must not name an existing system account** (`nobody`, `www-data`, …), and
   the admin password must be a single line.
 
@@ -83,7 +85,10 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - Clearer start-up errors for an admin name that is an existing group, an empty
   `CUPS_SERVER_ALIAS`, and a `UMASK` that would make PDFs unreadable by their owner.
 - PDFs cut off mid-conversion (e.g. the container was killed) are removed from staging after an
-  hour instead of piling up.
+  hour instead of piling up; a finished PDF whose completion marker went missing is published.
+- `TZ` accepts `:`-prefixed zone names and paths and POSIX rule strings.
+- A file that keeps failing to publish is retried with back-off (up to a minute) instead of
+  being copied again every second.
 - Output folders where root can't set file owners (SMB/CIFS shares, root-squashed NFS) still
   receive PDFs; a warning explains that ownership and mode could not be applied.
 - Scheduled rebuilds can no longer move `latest`/`X`/`X.Y` back to an older release, and carry the

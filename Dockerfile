@@ -79,8 +79,8 @@ ENV PRINTER_ID=Paperless_Printer \
     AVAHI_ENABLED=yes \
     ADVERTISED_HOST=""
 
+# No VOLUME: OUTPUT_DIR is configurable, so mount it explicitly (a warning is logged if not).
 EXPOSE 631
-VOLUME ["/mnt/output"]
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
   CMD ["/usr/local/bin/vprint-healthcheck"]

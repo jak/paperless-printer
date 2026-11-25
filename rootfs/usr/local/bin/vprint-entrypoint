@@ -114,8 +114,15 @@ validate() {
     root | vprint | lp | daemon | avahi) die "CUPS_ADMIN_USER must not be the system account '$CUPS_ADMIN_USER'" ;;
   esac
   # Real zone files start with "TZif"; zoneinfo also holds tables such as zone.tab.
-  [[ -n $TZ && $TZ != *..* && -f /usr/share/zoneinfo/$TZ && $(head -c4 "/usr/share/zoneinfo/$TZ") == TZif ]] ||
+  # A zone name (optionally ":"-prefixed) or path must be a real zone file ("TZif"; zoneinfo
+  # also holds tables such as zone.tab); a POSIX rule string such as EST5EDT,M3.2.0,M11.1.0
+  # is accepted as is.
+  local zone=${TZ#:}
+  [[ $zone == /* ]] || zone=/usr/share/zoneinfo/$zone
+  if ! [[ -n ${TZ#:} && $TZ != *..* && -f $zone && $(head -c4 "$zone") == TZif ]] &&
+    ! [[ $TZ =~ ^(\<[A-Za-z0-9+-]+\>|[A-Za-z]{3,})[+-]?[0-9]{1,2}(:[0-9]{2}){0,2}([A-Za-z]{3,}|\<[A-Za-z0-9+-]+\>)?([+-]?[0-9]{1,2}(:[0-9]{2}){0,2})?(,[^[:space:]]+)?$ ]]; then
     die "TZ '$TZ' is not a known time zone"
+  fi
   local sizes
   sizes=$(grep -oP '^\*PageSize \K[^/]+' "$PPD_SOURCE")
   grep -qxF -- "$PAPER_SIZE" <<<"$sizes" ||
@@ -260,6 +267,10 @@ prepare_dirs() {
     install -d -o "$PUID" -g "$PGID" -m 0775 "$OUTPUT_DIR"
   elif [[ $(stat -c '%u' "$OUTPUT_DIR") == 0 && -z $(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
     chown "$PUID:$PGID" "$OUTPUT_DIR" 2>/dev/null || true
+  fi
+  # On the same filesystem as / means inside the container: PDFs would be lost on recreate.
+  if [[ $(stat -c %d "$OUTPUT_DIR") == "$(stat -c %d /)" ]]; then
+    log "WARNING: $OUTPUT_DIR is not on a mounted volume; PDFs are kept inside the container and lost when it is recreated. Mount a volume or host directory there."
   fi
   # cups-pdf writes its log to <Log>/cups-pdf-<queue>_log; send it to the container log.
   ln -sf /proc/1/fd/2 "$RUN_DIR/log/cups-pdf_log"

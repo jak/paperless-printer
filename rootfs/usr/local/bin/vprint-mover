@@ -28,6 +28,9 @@ mode=$(printf '%04o' $((0666 & ~8#${UMASK})))
 readonly STUCK=/run/vprint/mover.stuck HEARTBEAT=/run/vprint/mover.heartbeat
 # Files that failed this pass / last pass (the latter so each problem is logged once).
 declare -A failing=() warned=()
+# Back-off for files that keep failing to publish (seconds), so a full or broken share isn't
+# sent a complete copy every second; and the reason each one last failed.
+declare -A retry_at=() retry_delay=() last_reason=()
 stuck_reason=
 ownership_warned=
 
@@ -230,6 +233,29 @@ publish() {
   log "saved ${target}"
 }
 
+# job_state STAGED_FILE -> completed | active (pending, held or processing) | gone (aborted,
+# cancelled, no longer known, or no job id in the name) | unknown (cupsd can't say right now).
+job_state() {
+  local id out rc
+  if ! [[ ${1##*/} =~ -job_([0-9]+)\.pdf$ ]]; then
+    echo gone
+    return
+  fi
+  id=${BASH_REMATCH[1]}
+  out=$(timeout 5 ipptool -l "ipp://localhost/jobs/$id" /etc/vprint/get-job-state.test 2>/dev/null)
+  rc=$?
+  if ((rc != 0)); then
+    # ipptool exits 1 both for "no such job" and "can't connect".
+    ((rc != 124)) && scheduler_up && echo gone || echo unknown
+    return
+  fi
+  case $(sed -n '3{s/[[:space:]]*$//; p}' <<<"$out") in
+    completed) echo completed ;;
+    pending* | processing*) echo active ;;
+    *) echo gone ;;
+  esac
+}
+
 # Periodic clean-up of leftovers from crashes:
 # - temporary files in OUTPUT_DIR: never visible under their final name, and the source is
 #   still claimed in staging, so they can go once stale;
@@ -240,6 +266,16 @@ sweep() {
     -delete 2>/dev/null || true
   while IFS= read -r -d '' f; do
     [[ -e $f.done || -e $f.failed ]] && continue
+    # No marker yet: ask cupsd what happened to the job before deciding.
+    case $(job_state "$f") in
+      active | unknown) continue ;; # still converting, or cupsd can't say right now
+      completed)
+        # Converted, but the completion marker never got written: publish it after all.
+        log "publishing a finished PDF whose completion marker is missing: $(sanitize "${f##*/}")"
+        claim "$f" || true
+        continue
+        ;;
+    esac
     log "removing an incomplete PDF left in staging by an interrupted conversion: $(sanitize "${f##*/}")"
     rm -f "$f"
   done < <(find "$VPRINT_STAGING_DIR" -maxdepth 1 -type f -name '*.pdf' -mmin "+$ORPHAN_MAX_AGE_MIN" -print0 2>/dev/null)
@@ -325,7 +361,22 @@ while :; do
     stop_if_asked
   done
   for claimed in "$VPRINT_STAGING_DIR/$CLAIM_PREFIX"*/*; do
-    publish "$claimed" || true
+    if ((SECONDS < ${retry_at[$claimed]:-0})); then
+      # Backing off: still failing, for health purposes, with its last reason.
+      failing[$claimed]=1
+      stuck_reason=${last_reason[$claimed]:-}
+      continue
+    fi
+    if publish "$claimed"; then
+      unset 'retry_at[$claimed]' 'retry_delay[$claimed]' 'last_reason[$claimed]'
+    else
+      # 2, 4, 8 ... 60 seconds between attempts.
+      d=$((${retry_delay[$claimed]:-1} * 2))
+      ((d <= 60)) || d=60
+      retry_delay[$claimed]=$d
+      retry_at[$claimed]=$((SECONDS + d))
+      last_reason[$claimed]=$stuck_reason
+    fi
     : >"$HEARTBEAT"
     stop_if_asked
   done

@@ -29,7 +29,7 @@ cleanup() {
   if ((rc != 0 || failures != 0)) && docker inspect "$SERVER" >/dev/null 2>&1; then
     echo; echo "---- server logs ----"; docker logs "$SERVER" 2>&1 | tail -60
   fi
-  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" >/dev/null 2>&1 || true
+  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" "$SERVER-tz" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" "$VOL-spool" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   [[ -z ${SECRET_FILE:-} ]] || rm -f "$SECRET_FILE" "$SECRET_FILE.cfg" "$SECRET_FILE.share"
@@ -175,6 +175,7 @@ check "unauthenticated lpadmin is rejected" bash -c "! docker run --rm --network
 check "no password hashes in image history" bash -c "! docker history --no-trunc '$IMAGE' | grep -qE '[$][156y][$][A-Za-z0-9./]{4,}'"
 check "no private keys baked into the image" \
   bash -c "[[ -z \$(docker run --rm --entrypoint '' '$IMAGE' find /etc/ssl/private /usr/local/share/vprint/dist/cups/ssl -type f) ]]"
+check "a mounted output volume raises no warning" bash -c "! docker logs '$SERVER' 2>&1 | grep -q 'not on a mounted volume'"
 check "TLS certificate is generated per container" bash -c "docker exec '$SERVER' sh -c 'ls /var/spool/cups-tls/*.crt' >/dev/null"
 
 check "failed conversions are reported in the log" \
@@ -210,6 +211,12 @@ invalid_config "'#' in PRINTER_NAME" "must not contain '#'" -e PRINTER_NAME="Roo
 invalid_config "regex-like PAPER_SIZE" "PAPER_SIZE 'A.' is not supported" -e PAPER_SIZE="A."
 invalid_config "empty TZ" "is not a known time zone" -e TZ=
 invalid_config "a zoneinfo table as TZ" "is not a known time zone" -e TZ=zone.tab
+for tz in :Europe/London EST5EDT,M3.2.0,M11.1.0; do
+  docker run -d --name "$SERVER-tz" -e CUPS_ADMIN_PASSWORD=x -e TZ="$tz" "$IMAGE" >/dev/null
+  sleep 4
+  check "accepts TZ=$tz" bash -c "docker logs '$SERVER-tz' 2>&1 | grep -q '^vprint: printer'"
+  docker rm -f "$SERVER-tz" >/dev/null
+done
 invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/
 invalid_config "OUTPUT_DIR escaping via .." "OUTPUT_DIR must not be" -e OUTPUT_DIR=/mnt/../etc/x
 invalid_config "an existing system account as admin" "is an existing system account" -e CUPS_ADMIN_USER=nobody
@@ -296,6 +303,9 @@ check "queued PDF survives a restart and keeps its title" \
   test "$(claimed -printf '%f\n' | grep -cx 'Stuck Job-job_1.pdf')" = 2
 check "a reused job id does not overwrite the queued PDF" \
   test "$(claimed -exec md5sum {} + | cut -c1-32 | sort -u | wc -l | tr -d ' ')" = 2
+# A finished PDF whose completion marker never got written (job 1 completed) is published by
+# the start-up sweep, not deleted as an interrupted conversion.
+docker exec "$SERVER-stuck" sh -c 'echo done >/var/spool/vprint/Late-job_1.pdf && touch -d "-2 hours" /var/spool/vprint/Late-job_1.pdf'
 # A plain restart keeps job.cache (CacheDir is on the spool), so numbering continues.
 docker restart -t 5 "$SERVER-stuck" >/dev/null
 for _ in $(seq 1 30); do
@@ -307,6 +317,8 @@ for _ in $(seq 1 20); do
   [[ -n $(claimed -name 'After Restart-job_*') ]] && break
   sleep 1
 done
+check "a finished PDF missing its completion marker is published, not deleted" bash -c \
+  "docker logs '$SERVER-stuck' 2>&1 | grep -q 'publishing a finished PDF whose completion marker is missing: Late-job_1' && ! docker exec '$SERVER-stuck' test -e /var/spool/vprint/Late-job_1.pdf"
 check "job numbers continue across a restart" test "$(claimed -name 'After Restart-job_*' -printf '%f')" = "After Restart-job_2.pdf"
 
 docker rm -f "$SERVER-stuck" >/dev/null
