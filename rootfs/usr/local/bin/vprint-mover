@@ -17,24 +17,37 @@ declare -A warned=()
 
 log() { printf 'vprint-mover: %s\n' "$*" >&2; }
 
-# unique_target NAME -> OUTPUT_DIR/NAME, or NAME with -1, -2... before the extension if taken.
-unique_target() {
-  local name=$1 base ext n=1 target
-  target="$OUTPUT_DIR/$name"
+# place TMP NAME: rename TMP into OUTPUT_DIR as NAME, or NAME-1, NAME-2... if taken.
+# --update=none-fail never replaces an existing file (atomic no-replace rename), so a file
+# created concurrently by another writer can't be clobbered. Prints the final path.
+place() {
+  local tmp=$1 name=$2 base ext n=0 target
   base=${name%.*}
   ext=${name##*.}
   [[ $base == "$name" ]] && ext= || ext=".$ext"
-  while [[ -e $target ]]; do
-    target="$OUTPUT_DIR/${base}-${n}${ext}"
+  target="$OUTPUT_DIR/$name"
+  until mv --update=none-fail "$tmp" "$target" 2>/dev/null; do
+    [[ -e $tmp ]] || return 1
     n=$((n + 1))
+    ((n < 10000)) || return 1
+    target="$OUTPUT_DIR/${base}-${n}${ext}"
   done
   printf '%s' "$target"
 }
 
 # job_title ID -> the job-name cupsd recorded for the job (empty if unknown/untitled).
+# ipptool -l prints a header, a ruler and the value with '"' and '\' backslash-escaped.
+# Retries on timeout so a busy cupsd doesn't leave the file permanently "untitled".
 job_title() {
-  local title
-  title=$(timeout 5 ipptool -c "ipp://localhost/jobs/$1" /etc/vprint/get-job-name.test 2>/dev/null | sed -n '2p') || true
+  local out rc=1 attempt title
+  for attempt in 1 2 3; do
+    out=$(timeout 5 ipptool -l "ipp://localhost/jobs/$1" /etc/vprint/get-job-name.test 2>/dev/null)
+    rc=$?
+    ((rc == 124)) || break
+    ((attempt < 3)) && sleep 1
+  done
+  ((rc == 0)) || return 0
+  title=$(sed -n '3{s/[[:space:]]*$//; s/\\\(.\)/\1/g; p}' <<<"$out")
   [[ $title == "(stdin)" ]] && title=
   printf '%s' "$title"
 }
@@ -82,14 +95,20 @@ publish() {
     fi
     return 1
   fi
-  target=$(unique_target "$name")
-  mv -f "$tmp" "$target"
+  if ! target=$(place "$tmp" "$name"); then
+    rm -f "$tmp"
+    log "could not find a free file name for $name (will keep retrying)"
+    return 1
+  fi
   rm -f "$src" "$src.done"
   unset 'warned[$src]'
   log "saved ${target}"
 }
 
 trap 'exit 0' TERM INT
+# A crash or restart mid-publish can leave a temporary file behind; it was never visible
+# under its final name and the source is still staged (if staging survived), so drop it.
+find "$OUTPUT_DIR" -maxdepth 1 -name '.*.vprint-partial' -type f -delete 2>/dev/null || true
 log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
 while :; do
   for failed in "$VPRINT_STAGING_DIR"/*.failed; do
@@ -97,7 +116,8 @@ while :; do
     name=${name%.failed}
     id=
     [[ $name =~ -job_([0-9]+)\.pdf$ ]] && id=${BASH_REMATCH[1]}
-    log "ERROR: PDF conversion failed for job ${id:-?} \"$(job_title "${id:-0}")\"; no file was saved: $(tr '\n' ' ' <"$failed")"
+    # Titles and Ghostscript output are untrusted: sanitize so they can't forge log lines.
+    log "ERROR: PDF conversion failed for job ${id:-?} \"$(sanitize "$(job_title "${id:-0}")")\"; no file was saved: $(tr -s '[:cntrl:]' ' ' <"$failed")"
     rm -f "$failed" "${failed%.failed}" "${failed%.failed}.done"
   done
   for marker in "$VPRINT_STAGING_DIR"/*.done; do
