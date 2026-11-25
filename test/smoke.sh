@@ -124,6 +124,16 @@ check "titles with commas and quotes are kept readable" bash -c "printf '%s\n' \
 check "filenames use the job title + job id" bash -c "printf '%s\n' \"\$@\" | grep -qx 'Anon Job-job_[0-9]*.pdf'" _ "${files[@]}"
 check "path characters in titles are neutralised" bash -c "printf '%s\n' \"\$@\" | grep -qx '_Known_User-job_[0-9]*.pdf'" _ "${files[@]}"
 check "no partial or hidden files left behind" bash -c "[[ -z \$(docker exec '$SERVER' find /mnt/output -name '.*' -type f) ]]"
+# Staging is writable by every user in the container: a non-root process planting symlinks must
+# not get root to log or publish files it can't read itself.
+docker exec -u vprint "$SERVER" sh -c 'cd /var/spool/vprint && ln -s /etc/shadow leak.failed &&
+  ln -s /etc/shadow Leak-job_900.pdf && : >Leak-job_900.pdf.done'
+for _ in $(seq 1 15); do
+  docker exec "$SERVER" sh -c 'ls -A /var/spool/vprint | grep -qi leak' || break
+  sleep 1
+done
+check "symlinks planted in staging are not followed" bash -c \
+  "! docker logs '$SERVER' 2>&1 | grep -q 'admin:\\\$' && ! docker exec '$SERVER' grep -rqs 'admin:' /mnt/output && ! docker exec '$SERVER' sh -c 'ls -A /var/spool/vprint | grep -qi leak'"
 check "staging directory is empty" bash -c "[[ -z \$(docker exec '$SERVER' find /var/spool/vprint -type f) ]]"
 for f in "${files[@]}"; do
   check "$f is a PDF" bash -c "docker exec '$SERVER' head -c 5 '/mnt/output/$f' | grep -q '%PDF-'"
@@ -190,6 +200,7 @@ invalid_config "an existing system account as admin" "is an existing system acco
 invalid_config "an existing group name as admin" "is an existing system account or group" -e CUPS_ADMIN_USER=staff
 invalid_config "an empty CUPS_SERVER_ALIAS" "CUPS_SERVER_ALIAS must not be empty" -e CUPS_SERVER_ALIAS=
 invalid_config "a UMASK that hides PDFs from their owner" "would make the PDFs unreadable" -e UMASK=0777
+invalid_config "an empty admin password file" "points to an empty file" -e CUPS_ADMIN_PASSWORD_FILE=/dev/null
 invalid_config "a multi-line admin password" "must be a single line" -e CUPS_ADMIN_PASSWORD="$(printf 'one\nroot:two')"
 invalid_config "ADVERTISED_HOST with a space" "is not a host name or IP" -e ADVERTISED_HOST="bad host"
 # Run from /etc so a glob like '*.conf' would match files if the list were word-split unquoted.

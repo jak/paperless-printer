@@ -39,8 +39,10 @@ make Bonjour discovery work. Other set-ups:
 Without discovery (e.g. a bridge network with `-p 631:631`), add the printer manually as
 `ipp://<host>:631/printers/Paperless_Printer`.
 
-**Image tags:** `2.0.0`, `2.0`, `2` and `latest` are rebuilt weekly with Debian security updates,
-so they are *mutable*. Pin `ghcr.io/jak/virtual-cups-printer@sha256:…` if you need a fixed image.
+**Image tags:** the newest release is rebuilt weekly with Debian security updates, under its
+exact version (`2.0.0`) and its floating tags (`2.0`, `2`, `latest`), so these tags are
+*mutable*. Older releases are not rebuilt: follow `2` or `latest` to keep getting updates, or
+pin `ghcr.io/jak/virtual-cups-printer@sha256:…` if you need a fixed image.
 
 ## Configuration
 
@@ -121,7 +123,8 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
   `localhost`, including the container's own IP. It weakens CUPS's DNS-rebinding protection for
   the *read-only* pages; admin actions still need TLS plus credentials. If you know every name
   and IP clients use, list them instead.
-- Images are scanned with Trivy in CI and rebuilt weekly to pick up Debian security updates.
+- Images are scanned with Trivy in CI, and the newest release is rebuilt weekly to pick up
+  Debian security updates.
 
 ## Troubleshooting
 

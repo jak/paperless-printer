@@ -47,6 +47,8 @@ read_secret() {
     # $(<file) strips trailing newlines, which secrets files usually end with.
     local v
     v=$(<"${!file_var}")
+    # An empty file is a mistake (e.g. a `touch`ed secret), not a request for a random password.
+    [[ -n $v ]] || die "$file_var points to an empty file"
     printf '%s' "$v"
   else
     printf '%s' "${!name:-}"

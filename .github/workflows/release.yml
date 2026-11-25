@@ -96,11 +96,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.IMAGE }}
-          tags: type=raw,value=candidate-${{ github.run_id }}
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -109,8 +104,9 @@ jobs:
           push: true
           pull: true
           no-cache: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          # No metadata-action labels: they would override the Dockerfile's OCI version/revision
+          # labels (set from these build args) with the candidate tag and the triggering sha.
+          tags: ${{ env.IMAGE }}:candidate-${{ github.run_id }}
           build-args: |
             VERSION=${{ needs.resolve.outputs.version }}
             REVISION=${{ needs.resolve.outputs.revision }}

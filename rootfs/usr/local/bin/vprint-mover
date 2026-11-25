@@ -41,16 +41,23 @@ scheduler_up() { [[ $(lpstat -r 2>/dev/null) == "scheduler is running" ]]; }
 
 # place TMP NAME: rename TMP into OUTPUT_DIR as NAME, or NAME-1, NAME-2... if taken.
 # --update=none-fail never replaces an existing file (atomic no-replace rename), so a file
-# created concurrently by another writer can't be clobbered. Prints the final path.
+# created concurrently by another writer can't be clobbered. Prints the final path; on an
+# error other than a name clash, prints the error and returns 2.
 place() {
-  local tmp=$1 name=$2 base ext n=0 target
+  local tmp=$1 name=$2 base ext n=0 target err
   base=${name%.*}
   ext=${name##*.}
   [[ $base == "$name" ]] && ext= || ext=".$ext"
   target="$OUTPUT_DIR/$name"
   # -T: never move into a directory that happens to have the target's name.
-  until mv -T --update=none-fail "$tmp" "$target" 2>/dev/null; do
+  until err=$(mv -T --update=none-fail "$tmp" "$target" 2>&1); do
     [[ -e $tmp ]] || return 1
+    # Only an existing target is a clash; anything else (permissions, a filesystem without
+    # no-replace renames) would fail the same way for every suffix.
+    if [[ ! -e $target && ! -L $target ]]; then
+      printf '%s' "$err"
+      return 2
+    fi
     n=$((n + 1))
     ((n < 10000)) || return 1
     target="$OUTPUT_DIR/${base}-${n}${ext}"
@@ -137,7 +144,17 @@ claim() {
 
 # publish FILE: copy a claimed file into OUTPUT_DIR under its name (de-duplicated).
 publish() {
-  local src=$1 name=${1##*/} tmp target
+  local src=$1 name=${1##*/} tmp target rc
+  # Claim directories are root's own (mode 0700), so what is checked here can't change before
+  # it is copied. Staging is writable by every user in the container: never follow a symlink
+  # or anything else planted there, and ignore claim directories root didn't create.
+  [[ -d ${src%/*} && ! -L ${src%/*} && -O ${src%/*} ]] || return 0
+  if [[ ! -f $src || -L $src ]]; then
+    log "ignoring a staged entry that is not a regular file: $(sanitize "$name")"
+    rm -f "$src"
+    rmdir "${src%/*}" 2>/dev/null || true
+    return 0
+  fi
   # A unique temporary file per publish (mktemp uses O_EXCL), so publishers sharing an output
   # directory can never overwrite each other's copy before it is renamed into place.
   if ! tmp=$(mktemp --suffix=.vprint-partial "$OUTPUT_DIR/.vprint-XXXXXXXXXX" 2>/dev/null) ||
@@ -146,9 +163,15 @@ publish() {
     blocked "$src" "cannot write to $OUTPUT_DIR (will keep retrying): $name"
     return 1
   fi
-  if ! target=$(place "$tmp" "$name"); then
+  target=$(place "$tmp" "$name")
+  rc=$?
+  if ((rc != 0)); then
     rm -f "$tmp"
-    blocked "$src" "could not find a free file name for $name (will keep retrying)"
+    if ((rc == 2)); then
+      blocked "$src" "cannot rename into $OUTPUT_DIR (will keep retrying): $target"
+    else
+      blocked "$src" "could not find a free file name for $name (will keep retrying)"
+    fi
     return 1
   fi
   rm -f "$src"
@@ -172,11 +195,20 @@ sweep() {
   next_sweep=$((SECONDS + PARTIAL_MAX_AGE_MIN * 60))
 }
 
-trap 'exit 0' TERM INT
+# Stop between files, never in the middle of one: exiting after a file is renamed into place
+# but before its staged copy is removed would publish it again on the next start.
+stopping=0
+trap 'stopping=1' TERM INT
+stop_if_asked() { ((stopping == 0)) || exit 0; }
+# Root-only directory for inspecting *.failed reports (staging is writable by every user).
+find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name '.vprint-private.*' -user root \
+  -exec rm -rf {} + 2>/dev/null || true
+PRIVATE=$(mktemp -d "$VPRINT_STAGING_DIR/.vprint-private.XXXXXXXX") || exit 1
 : >"$HEARTBEAT"
 rm -f "$STUCK"
 # Titles come from cupsd, so give it a moment to come up before claiming anything.
 for _ in $(seq 1 30); do
+  stop_if_asked
   scheduler_up && break
   sleep 1
 done
@@ -185,19 +217,32 @@ sweep
 find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name "${CLAIM_PREFIX}*" -empty -delete 2>/dev/null || true
 log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
 while :; do
+  stop_if_asked
   ((SECONDS < next_sweep)) || sweep
   for failed in "$VPRINT_STAGING_DIR"/*.failed; do
     name=${failed##*/}
     name=${name%.failed}
     id=
     [[ $name =~ -job_([0-9]+)\.pdf$ ]] && id=${BASH_REMATCH[1]}
+    # Move the report somewhere only root can write before reading it: a symlink planted in
+    # staging must not make root read (and log) another file.
+    report=$PRIVATE/report
+    rm -rf "$report"
+    mv -T "$failed" "$report" 2>/dev/null || continue
+    details="(unreadable report)"
+    [[ -f $report && ! -L $report ]] && details=$(head -c 2000 "$report" | tr -s '[:cntrl:]' ' ')
     # Titles and Ghostscript output are untrusted: sanitize so they can't forge log lines.
-    log "ERROR: PDF conversion failed for job ${id:-?} \"$(sanitize "$(job_title "${id:-0}")")\"; no file was saved: $(tr -s '[:cntrl:]' ' ' <"$failed")"
-    rm -f "$failed" "${failed%.failed}" "${failed%.failed}.done"
+    log "ERROR: PDF conversion failed for job ${id:-?} \"$(sanitize "$(job_title "${id:-0}")")\"; no file was saved: $details"
+    rm -rf "$report"
+    rm -f "${failed%.failed}" "${failed%.failed}.done"
   done
   for marker in "$VPRINT_STAGING_DIR"/*.done; do
     src=${marker%.done}
-    if [[ -f $src ]]; then
+    if [[ -L $src ]]; then
+      # cups-pdf never writes symlinks; something else planted it. Don't follow it.
+      log "ignoring a staged entry that is not a regular file: $(sanitize "${src##*/}")"
+      rm -f "$src" "$marker"
+    elif [[ -f $src ]]; then
       claim "$src"
       case $? in
         0) ;;
@@ -208,10 +253,12 @@ while :; do
       rm -f "$marker"
     fi
     : >"$HEARTBEAT" # per file: a slow cupsd can make one pass take minutes
+    stop_if_asked
   done
   for claimed in "$VPRINT_STAGING_DIR/$CLAIM_PREFIX"*/*; do
     publish "$claimed" || true
     : >"$HEARTBEAT"
+    stop_if_asked
   done
   warned=()
   for f in "${!failing[@]}"; do warned[$f]=1; done
