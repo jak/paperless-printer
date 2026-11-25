@@ -100,6 +100,11 @@ for _ in $(seq 1 60); do
   [[ $(outputs | wc -l) -ge 3 ]] && break
   sleep 1
 done
+# Also wait for the broken job to be fully processed, so the staging checks below see a quiet spool.
+for _ in $(seq 1 60); do
+  docker logs "$SERVER" 2>&1 | grep -q 'PDF conversion failed for job' && break
+  sleep 1
+done
 files=()
 while IFS= read -r f; do files+=("$f"); done < <(outputs)
 printf '  files: %s\n' "${files[@]:-<none>}"
