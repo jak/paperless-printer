@@ -214,9 +214,8 @@ invalid_config "PRINTER_ID with a space" "PRINTER_ID must be" -e PRINTER_ID="has
 invalid_config "PRINTER_NAME over 63 bytes" "at most 63 bytes" -e PRINTER_NAME="$(printf 'N%.0s' $(seq 1 64))"
 invalid_config "'#' in PRINTER_NAME" "must not contain '#'" -e PRINTER_NAME="Room #2"
 invalid_config "regex-like PAPER_SIZE" "PAPER_SIZE 'A.' is not supported" -e PAPER_SIZE="A."
-invalid_config "empty TZ" "is not a known time zone" -e TZ=
 invalid_config "a zoneinfo table as TZ" "is not a known time zone" -e TZ=zone.tab
-for tz in :Europe/London EST5EDT,M3.2.0,M11.1.0; do
+for tz in "" :Europe/London EST5EDT,M3.2.0,M11.1.0; do
   docker run -d --name "$SERVER-tz" -e CUPS_ADMIN_PASSWORD=x -e TZ="$tz" "$IMAGE" >/dev/null
   sleep 4
   check "accepts TZ=$tz" bash -c "docker logs '$SERVER-tz' 2>&1 | grep -q '^vprint: printer'"

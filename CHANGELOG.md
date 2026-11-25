@@ -64,8 +64,9 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   first start, kept with `/var/spool` (or set `PRINTER_UUID`).
 - Unbounded log files inside the container.
 - Job titles containing commas or quotes no longer produce mangled file names.
-- Stricter validation: `PRINTER_NAME` length and characters, exact `PAPER_SIZE` match, empty
-  `TZ`, `PUID`/`PGID` with leading zeros, system directories as `OUTPUT_DIR`.
+- Stricter validation: `PRINTER_NAME` length and characters, exact `PAPER_SIZE` match, `TZ`
+  (an empty value means UTC), `PUID`/`PGID` with leading zeros, system directories as
+  `OUTPUT_DIR`.
 - An existing output directory's ownership is no longer changed at start.
 - A directory in the output folder with the same name as a new PDF no longer swallows it.
 - Several containers can share one output directory without overwriting each other's files.

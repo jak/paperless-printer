@@ -113,10 +113,11 @@ validate() {
   case $CUPS_ADMIN_USER in
     root | vprint | lp | daemon | avahi) die "CUPS_ADMIN_USER must not be the system account '$CUPS_ADMIN_USER'" ;;
   esac
-  # Real zone files start with "TZif"; zoneinfo also holds tables such as zone.tab.
   # A zone name (optionally ":"-prefixed) or path must be a real zone file ("TZif"; zoneinfo
   # also holds tables such as zone.tab); a POSIX rule string such as EST5EDT,M3.2.0,M11.1.0
   # is accepted as is.
+  # Empty (e.g. `TZ: ${TZ:-}` in compose) means UTC, as in most images.
+  [[ -n $TZ ]] || export TZ=UTC
   local zone=${TZ#:}
   [[ $zone == /* ]] || zone=/usr/share/zoneinfo/$zone
   if ! [[ -n ${TZ#:} && $TZ != *..* && -f $zone && $(head -c4 "$zone") == TZif ]] &&
@@ -170,19 +171,22 @@ setup_users() {
 # stored_uuid: a random UUID generated on first start and kept with the spool (a volume in the
 # compose examples), so clients keep recognising the printer across restarts while every
 # deployment gets its own, even with the default PRINTER_ID.
+# Fails (with a message) if it can't be stored: a UUID that changed on every start would make
+# clients add a new printer each time.
 stored_uuid() {
   local f=/var/spool/vprint-state/printer-uuid u=
-  install -d -m 0755 "${f%/*}"
+  install -d -m 0755 "${f%/*}" || die "cannot create ${f%/*} to store the printer UUID"
   [[ -s $f ]] && u=$(<"$f")
   if ! [[ $u =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
     u=$(</proc/sys/kernel/random/uuid)
-    printf '%s\n' "$u" >"$f"
+    printf '%s\n' "$u" >"$f" || die "cannot store the printer UUID in $f (set PRINTER_UUID instead)"
   fi
   printf '%s' "$u"
 }
 
 render_config() {
-  PRINTER_UUID=${PRINTER_UUID:-$(stored_uuid)}
+  # Not inside ${...:-$(...)}: a failure must stop the start-up (set -e), not pass unnoticed.
+  [[ -n $PRINTER_UUID ]] || PRINTER_UUID=$(stored_uuid)
   PRINTER_UUID=${PRINTER_UUID,,}
   PRINTER_NAME_XML=$(xml_escape "$PRINTER_NAME")
   PRINTER_LOCATION_XML=$(xml_escape "$PRINTER_LOCATION")
