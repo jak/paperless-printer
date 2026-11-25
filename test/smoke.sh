@@ -134,6 +134,13 @@ for _ in $(seq 1 15); do
 done
 check "symlinks planted in staging are not followed" bash -c \
   "! docker logs '$SERVER' 2>&1 | grep -q 'admin:\\\$' && ! docker exec '$SERVER' grep -rqs 'admin:' /mnt/output && ! docker exec '$SERVER' sh -c 'ls -A /var/spool/vprint | grep -qi leak'"
+# Something other than a file inside a claim directory (e.g. swapped in while the claim waited
+# for cupsd) is removed once and logged once, not retried and logged every second.
+docker exec "$SERVER" sh -c 'd=/var/spool/vprint/.vprint-claim.smoketest && mkdir -m 0700 $d &&
+  mkdir "$d/Odd-job_901.pdf" && : >"$d/Odd-job_901.pdf/x"'
+sleep 4
+check "a non-file in a claim directory is removed and logged once" bash -c \
+  "! docker exec '$SERVER' test -e /var/spool/vprint/.vprint-claim.smoketest && [[ \$(docker logs '$SERVER' 2>&1 | grep -c 'not a regular file: Odd-job_901') == 1 ]]"
 check "staging directory is empty" bash -c "[[ -z \$(docker exec '$SERVER' find /var/spool/vprint -type f) ]]"
 for f in "${files[@]}"; do
   check "$f is a PDF" bash -c "docker exec '$SERVER' head -c 5 '/mnt/output/$f' | grep -q '%PDF-'"
@@ -202,13 +209,15 @@ invalid_config "an empty CUPS_SERVER_ALIAS" "CUPS_SERVER_ALIAS must not be empty
 invalid_config "a UMASK that hides PDFs from their owner" "would make the PDFs unreadable" -e UMASK=0777
 invalid_config "an empty admin password file" "points to an empty file" -e CUPS_ADMIN_PASSWORD_FILE=/dev/null
 invalid_config "a multi-line admin password" "must be a single line" -e CUPS_ADMIN_PASSWORD="$(printf 'one\nroot:two')"
+invalid_config "ADVERTISED_HOST with a port" "is not a valid IPv6 address" -e ADVERTISED_HOST=beef:631
+invalid_config "OUTPUT_DIR=/tmp" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/tmp
 invalid_config "ADVERTISED_HOST with a space" "is not a host name or IP" -e ADVERTISED_HOST="bad host"
 # Run from /etc so a glob like '*.conf' would match files if the list were word-split unquoted.
 docker run --rm -w /etc -e CUPS_ADMIN_PASSWORD=x -e ADVERTISED_HOST=fd00::12 \
-  -e CUPS_ALLOW_FROM='@LOCAL @IF(eth0) [fd00::]/8 *.conf' --entrypoint bash "$IMAGE" -c \
+  -e CUPS_ALLOW_FROM="$(printf '@LOCAL @IF(eth0)\n[fd00::]/8\n*.conf')" --entrypoint bash "$IMAGE" -c \
   'vprint-entrypoint >/dev/null 2>&1 & for _ in $(seq 1 20); do [ -s /etc/avahi/services/vprint.service ] && [ -s /etc/cups/cupsd.conf ] && break; sleep 0.5; done; sleep 1
    cupsd -t >/dev/null 2>&1 && echo CUPSD_OK; grep -h "Allow\|adminurl" /etc/cups/cupsd.conf /etc/avahi/services/vprint.service' >"$SECRET_FILE.cfg" 2>&1 || true
-check "allow-list accepts @IF(name) and [IPv6] and cupsd accepts the result" bash -c \
+check "allow-list accepts @IF(name), [IPv6] and one entry per line; cupsd accepts the result" bash -c \
   "grep -q CUPSD_OK '$SECRET_FILE.cfg' && grep -qxF '  Allow @IF(eth0)' '$SECRET_FILE.cfg' && grep -qxF '  Allow [fd00::]/8' '$SECRET_FILE.cfg'"
 check "allow-list entries are not glob-expanded" grep -qx '  Allow \*\.conf' "$SECRET_FILE.cfg"
 check "IPv6 ADVERTISED_HOST is bracketed in the admin URL" grep -qF 'adminurl=https://[fd00::12]:631/' "$SECRET_FILE.cfg"

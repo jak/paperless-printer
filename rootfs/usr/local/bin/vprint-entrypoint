@@ -24,6 +24,19 @@ is_true() {
   esac
 }
 
+# valid_ipv6 ADDR: a plain IPv6 literal (8 groups, or fewer with a single "::"; no zone, no
+# embedded IPv4). Rejects look-alikes such as "beef:631" (a host with a port).
+valid_ipv6() {
+  local s=$1 colons groups g
+  [[ $s =~ ^[0-9A-Fa-f:]+$ && $s != *:::* && $s != *::*::* ]] || return 1
+  [[ $s != :* || $s == ::* ]] && [[ $s != *: || $s == *:: ]] || return 1
+  colons=${s//[^:]/}
+  ((${#colons} >= 2 && ${#colons} <= 7)) || return 1
+  IFS=: read -r -a groups <<<"$s"
+  for g in "${groups[@]}"; do ((${#g} <= 4)) || return 1; done
+  [[ $s == *::* ]] || ((${#colons} == 7))
+}
+
 xml_escape() {
   local s=$1
   # Quoted replacements: with bash 5.2's patsub_replacement an unquoted `&` means the match.
@@ -82,7 +95,9 @@ validate() {
   OUTPUT_DIR=$(realpath -m -- "$OUTPUT_DIR")
   case $OUTPUT_DIR in
     / | /bin | /boot | /dev | /etc | /lib | /proc | /run | /sbin | /sys | /usr | /var | /var/spool | \
-      /bin/* | /boot/* | /dev/* | /etc/* | /lib/* | /proc/* | /run/* | /sbin/* | /sys/* | /usr/* | /var/spool/*)
+      /tmp | /var/tmp | \
+      /bin/* | /boot/* | /dev/* | /etc/* | /lib/* | /proc/* | /run/* | /sbin/* | /sys/* | /usr/* | /var/spool/* | \
+      /tmp/* | /var/tmp/*)
       die "OUTPUT_DIR must not be / or a system directory (got '$OUTPUT_DIR')" ;;
   esac
   [[ $CUPS_LOG_LEVEL =~ ^(none|emerg|alert|crit|error|warn|notice|info|debug|debug2)$ ]] ||
@@ -153,9 +168,11 @@ render_config() {
   VPRINT_ADMINURL_RECORD=
   if [[ -n $ADVERTISED_HOST ]]; then
     local host=$ADVERTISED_HOST record
-    if [[ $host =~ ^[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*$ ]]; then
+    [[ $host =~ ^\[(.*)\]$ ]] && host=${BASH_REMATCH[1]}
+    if [[ $host == *:* ]]; then
+      valid_ipv6 "$host" || die "ADVERTISED_HOST '$ADVERTISED_HOST' is not a valid IPv6 address (no port: the URL uses 631)"
       host="[$host]" # IPv6 literal: brackets are required in a URL
-    elif ! [[ $host =~ ^\[[0-9A-Fa-f:.]+\]$ || $host =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+    elif ! [[ $host =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
       die "ADVERTISED_HOST '$ADVERTISED_HOST' is not a host name or IP address"
     fi
     record="adminurl=https://$host:631/printers/${PRINTER_ID}"
@@ -165,10 +182,10 @@ render_config() {
   fi
   CUPS_WEB_INTERFACE=$(is_true "$CUPS_WEB_INTERFACE" && echo Yes || echo No)
   # Split with read -a, not an unquoted expansion, so '*' or '*.lan' is never globbed against
-  # file names in the working directory.
+  # file names in the working directory. -d '' reads every line (e.g. a YAML block list).
   local addr addrs
   CUPS_ALLOW_DIRECTIVES=
-  read -r -a addrs <<<"$CUPS_ALLOW_FROM"
+  read -r -d '' -a addrs <<<"$CUPS_ALLOW_FROM" || true
   for addr in ${addrs[@]+"${addrs[@]}"}; do
     # Names, IPv4/CIDR, @LOCAL, @IF(name), [IPv6]/prefix, *.domain, all, none.
     [[ $addr =~ ^[][A-Za-z0-9@.:/*_()-]+$ ]] || die "CUPS_ALLOW_FROM entry '$addr' is not a CUPS address"
@@ -176,11 +193,12 @@ render_config() {
   done
   [[ -n $CUPS_ALLOW_DIRECTIVES ]] || die "CUPS_ALLOW_FROM must not be empty (use 'all' to allow everyone)"
   CUPS_ALLOW_DIRECTIVES=${CUPS_ALLOW_DIRECTIVES%$'\n'}
-  read -r -a addrs <<<"$CUPS_SERVER_ALIAS"
+  read -r -d '' -a addrs <<<"$CUPS_SERVER_ALIAS" || true
   ((${#addrs[@]})) || die "CUPS_SERVER_ALIAS must not be empty (use '*' to accept any host name)"
-  for addr in ${addrs[@]+"${addrs[@]}"}; do
+  for addr in "${addrs[@]}"; do
     [[ $addr =~ ^[A-Za-z0-9.:*_-]+$ ]] || die "CUPS_SERVER_ALIAS entry '$addr' is not a host name"
   done
+  CUPS_SERVER_ALIAS="${addrs[*]}" # one line for the ServerAlias directive
 
   export PRINTER_ID PRINTER_NAME PRINTER_LOCATION PRINTER_UUID PRINTER_NAME_XML PRINTER_LOCATION_XML \
     VPRINT_NOW VPRINT_ADMINURL_RECORD CUPS_WEB_INTERFACE CUPS_ALLOW_DIRECTIVES CUPS_SERVER_ALIAS \

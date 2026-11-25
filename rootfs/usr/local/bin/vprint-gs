@@ -9,15 +9,25 @@ for arg in "$@"; do
     -sOutputFile=*) out=${arg#-sOutputFile=} ;;
   esac
 done
-err=$(mktemp) || exit 1
-/usr/bin/gs "$@" 2>"$err"
+# Ghostscript's messages go to a temporary file so they can be quoted in the report. If even
+# that can't be created (e.g. /tmp is full), run it anyway: a failure must still be reported.
+err=$(mktemp 2>/dev/null) || err=
+if [ -n "$err" ]; then
+  /usr/bin/gs "$@" 2>"$err"
+else
+  /usr/bin/gs "$@"
+fi
 status=$?
 if [ "$status" -ne 0 ] && [ -n "$out" ]; then
   # Written under a temporary name and renamed, so vprint-mover never reads it half-written.
-  { echo "exit status $status"; tail -n 5 "$err"; } >"$out.failed.tmp" 2>/dev/null &&
-    mv -f "$out.failed.tmp" "$out.failed"
+  {
+    echo "exit status $status"
+    if [ -n "$err" ]; then tail -n 5 "$err"; else echo "(no details: could not create a temporary file)"; fi
+  } >"$out.failed.tmp" 2>/dev/null && mv -f "$out.failed.tmp" "$out.failed"
   rm -f "$out"
 fi
-cat "$err" >&2
-rm -f "$err"
+if [ -n "$err" ]; then
+  cat "$err" >&2
+  rm -f "$err"
+fi
 exit "$status"

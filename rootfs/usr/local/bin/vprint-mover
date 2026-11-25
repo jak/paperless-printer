@@ -44,7 +44,7 @@ scheduler_up() { [[ $(lpstat -r 2>/dev/null) == "scheduler is running" ]]; }
 # created concurrently by another writer can't be clobbered. Prints the final path; on an
 # error other than a name clash, prints the error and returns 2.
 place() {
-  local tmp=$1 name=$2 base ext n=0 target err
+  local tmp=$1 name=$2 base ext n=0 target err retried=
   base=${name%.*}
   ext=${name##*.}
   [[ $base == "$name" ]] && ext= || ext=".$ext"
@@ -55,9 +55,13 @@ place() {
     # Only an existing target is a clash; anything else (permissions, a filesystem without
     # no-replace renames) would fail the same way for every suffix.
     if [[ ! -e $target && ! -L $target ]]; then
+      # It may just have been consumed (deleted) since the rename failed: try the same name
+      # once more before calling it an error.
+      [[ -z $retried ]] && { retried=1; continue; }
       printf '%s' "$err"
       return 2
     fi
+    retried=
     n=$((n + 1))
     ((n < 10000)) || return 1
     target="$OUTPUT_DIR/${base}-${n}${ext}"
@@ -151,7 +155,7 @@ publish() {
   [[ -d ${src%/*} && ! -L ${src%/*} && -O ${src%/*} ]] || return 0
   if [[ ! -f $src || -L $src ]]; then
     log "ignoring a staged entry that is not a regular file: $(sanitize "$name")"
-    rm -f "$src"
+    rm -rf -- "$src" # inside root's own claim directory, so whatever it is can go
     rmdir "${src%/*}" 2>/dev/null || true
     return 0
   fi
