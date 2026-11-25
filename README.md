@@ -1,35 +1,138 @@
-# Cups/paperless-printer Docker Container
+# virtual-cups-printer
 
-This docker file will create a virtual printer in cupsd that will output to `/mnt/output`. This will allow printing
-from a network postcript printer that will output a pdf to a volume or mount. You can change the output path in `cups-pdf.conf`
+[![CI](https://github.com/jak/virtual-cups-printer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jak/virtual-cups-printer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-One possible use of this is in conjunection with a [paperless-ngx](https://github.com/paperless-ngx/paperless-ngx) consume directory
-to read pdf's.
+A network printer in a container that saves every job as a PDF. Phones, tablets and
+computers on your LAN discover it via AirPrint/Bonjour (IPP), print to it, and the PDF
+lands in a directory, for example the consume folder of
+[paperless-ngx](https://github.com/paperless-ngx/paperless-ngx).
 
-## Install
+- Works with iOS/iPadOS, macOS, Windows, Android and Linux (IPP / AirPrint)
+- Colour PDFs; A4, Letter and other paper sizes
+- Files appear **atomically** (never half-written) with the owner and permissions you choose
+- File names come from the document title: `Invoice 42-job_7.pdf`
+- Configured entirely through environment variables; admin over HTTPS only
+- Multi-arch images (`linux/amd64`, `linux/arm64`)
 
-See `docker-compose.yml` for example.
+## Quick start
 
-The http/print server will listen on port `631`. The default username/password is print/print, and can be changed in the `Dockerfile`
-
-## Avahi (Optional, but recommended)
-
-In order to make the printer discoverable, avahi needs to be set up.  For it to work correctly on the network, it should share the network space
-with its own IP.  The easiest way to do this is to assign it a static IP in non-dhcp space via `macvlan`.
-
-## Macvlan
-
-Docker-compose setup, for example in `192.168.0.0/24` space.
-
-```yaml
-network:
-  vlan:
-    driver: macvlan
-    driver_opts:
-      parent: eth0 #Update as necessary
-    ipam:
-      config:
-        - subnet: "192.168.0.0/24"
-          ip_range: "192.168.0.200/32"
-          gateway: "192.168.0.1"
+```sh
+git clone https://github.com/jak/virtual-cups-printer && cd virtual-cups-printer
+echo 'choose-a-password' > admin_password.txt
+docker compose up -d
 ```
+
+Print to **Paperless Printer** from any device on the network. PDFs appear in `./output`.
+The CUPS admin UI is at `https://<host>:631/admin` (user `admin`, the password above; the
+certificate is self-signed).
+
+[`docker-compose.yml`](docker-compose.yml) uses host networking, which is the simplest way to
+make Bonjour discovery work. Other set-ups:
+
+| Example | Use it when |
+|---|---|
+| [`docker-compose.yml`](docker-compose.yml) | One printer, host networking |
+| [`examples/macvlan`](examples/macvlan/docker-compose.yml) | The printer should have its own LAN IP, or you run several printers on one host |
+| [`examples/paperless`](examples/paperless/docker-compose.yml) | Feed paperless-ngx directly |
+
+Without discovery (e.g. a bridge network with `-p 631:631`), add the printer manually as
+`ipp://<host>:631/printers/Paperless_Printer`.
+
+## Configuration
+
+Set these as environment variables; no rebuild is needed. Invalid values stop the container
+at start with a clear message (exit code 64).
+
+| Variable | Default | Description |
+|---|---|---|
+| `PRINTER_NAME` | `Paperless Printer` | Name shown to clients |
+| `PRINTER_ID` | `Paperless_Printer` | CUPS queue name (letters, digits, `_`, `-`); used in the URL `/printers/<id>` |
+| `PRINTER_LOCATION` | *(empty)* | Location shown to clients |
+| `PRINTER_UUID` | *derived from `PRINTER_ID`* | Fixed UUID, if you need one |
+| `PAPER_SIZE` | `A4` | Default paper size, e.g. `A4`, `Letter`, `Legal`, `A5` |
+| `TZ` | `UTC` | Time zone for timestamps |
+| `OUTPUT_DIR` | `/mnt/output` | Where PDFs are written inside the container (mount a volume here) |
+| `PUID` / `PGID` | `1000` / `1000` | Owner of the PDFs. Match the consumer (e.g. paperless `USERMAP_UID`/`USERMAP_GID`) |
+| `UMASK` | `0022` | Permission mask for PDFs (`0022` gives `0644`, `0027` gives `0640`, `0002` gives `0664`) |
+| `OUTPUT_LABEL` | `2` | File naming: `0` = `Title.pdf`, `1` = `job_7-Title.pdf`, `2` = `Title-job_7.pdf`. Name clashes get `-1`, `-2`, … |
+| `CUPS_ADMIN_USER` | `admin` | Admin user for the web UI and `lpadmin` |
+| `CUPS_ADMIN_PASSWORD_FILE` | | File holding the admin password (Docker secret, **preferred**) |
+| `CUPS_ADMIN_PASSWORD` | | Admin password. If neither is set, a random one is printed to the log at each start |
+| `CUPS_ALLOW_FROM` | `all` | Space-separated CUPS addresses allowed to connect, e.g. `@LOCAL 192.168.1.0/24` |
+| `CUPS_SERVER_ALIAS` | `*` | Host names clients may use. `*` is needed unless you list every name and IP (see [Security](#security)) |
+| `CUPS_WEB_INTERFACE` | `yes` | Set `no` to disable the web UI |
+| `CUPS_LOG_LEVEL` | `warn` | `error`, `warn`, `info`, `debug`, … |
+| `AVAHI_ENABLED` | `yes` | Set `no` to disable Bonjour/AirPrint advertising |
+| `ADVERTISED_HOST` | *(empty)* | Host or IP for the admin link in the Bonjour record |
+
+Configuration comes **only** from the environment: changes made in the CUPS web UI are lost
+when the container restarts.
+
+## How it works
+
+```
+client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/spool/vprint (staging)
+                                                         │ PostProcessing hook marks it done
+                                                         ▼
+                                        vprint-mover: copy as .name.vprint-partial,
+                                        chown PUID:PGID, chmod, rename ──▶ OUTPUT_DIR
+```
+
+- `tini` is PID 1. `vprint-entrypoint` validates the environment, renders the
+  [templates](rootfs/etc/vprint/templates), and supervises `cupsd`, `avahi-daemon` and
+  `vprint-mover`. If any of them dies the container exits, so your restart policy recovers it.
+- cups-pdf writes PDFs in place while Ghostscript runs, so they are staged first and published
+  with an atomic rename. Consumers such as paperless never see a partial file.
+- cups-pdf 3.0.2 garbles titles it reads from PostScript, so the mover asks cupsd for each
+  job's real title. Titles are sanitised: no path separators or control characters, at most
+  100 bytes.
+- `HEALTHCHECK` reports unhealthy if cupsd stops responding, the queue stops accepting jobs, or
+  a helper process dies.
+- All logs (CUPS, cups-pdf, Avahi, vprint) go to `docker logs`.
+
+## Security
+
+- Printing is anonymous, as with any network printer. Restrict who can reach it with your
+  network, or with `CUPS_ALLOW_FROM`.
+- Administration requires the admin password **and** TLS. Over plain HTTP, CUPS answers
+  `426 Upgrade Required`, so the password never crosses the network unencrypted.
+- No credentials are baked into the image. Passwords are stored as SHA-512 hashes at runtime.
+- The compose examples drop all capabilities except the eight CUPS, cups-pdf and Avahi need,
+  and set `no-new-privileges`.
+- `CUPS_SERVER_ALIAS=*` is the default because CUPS otherwise rejects every Host header except
+  `localhost`, including the container's own IP. It weakens CUPS's DNS-rebinding protection for
+  the *read-only* pages; admin actions still need TLS plus credentials. If you know every name
+  and IP clients use, list them instead.
+- Images are scanned with Trivy in CI and rebuilt weekly to pick up Debian security updates.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Printer not discovered | Use `network_mode: host` or macvlan. Bonjour doesn't cross bridge networks or VLANs without an mDNS reflector. Check `docker logs` for `Service "…" successfully established`. |
+| Docker host can't reach a macvlan printer | Expected: macvlan isolates the host from its children. See the shim commands in [`examples/macvlan`](examples/macvlan/docker-compose.yml). |
+| paperless doesn't pick up files | `PUID`/`PGID` must match paperless's `USERMAP_UID`/`USERMAP_GID`. Check with `ls -ln` on the consume directory. |
+| PDFs are greyscale | Make sure the client has colour turned on; v2 advertises colour support. Please report the client and OS. |
+| Poor OCR in paperless | Set `PAPERLESS_OCR_MODE=force` in paperless; printed PDFs often have a poor text layer. |
+| Container keeps restarting | `docker logs`: configuration errors are explained and exit with code 64. |
+| Need more detail | `CUPS_LOG_LEVEL=debug` |
+
+## Upgrading from v1
+
+See [CHANGELOG.md](CHANGELOG.md). In short: set an admin password, use `https://` for the
+admin UI, set `PUID`/`PGID`, and stop editing `*.conf` files (use environment variables).
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `test/lint.sh` and `test/smoke.sh`.
+[Architecture decisions](docs/adr) are recorded as ADRs.
+
+## License
+
+[MIT](LICENSE). The image bundles third-party software under its own licences, including
+[CUPS](https://github.com/OpenPrinting/cups) (Apache-2.0), cups-filters (Apache-2.0 / GPL /
+MIT), [cups-pdf](https://www.cups-pdf.de/) (GPL-2.0-or-later),
+[Ghostscript](https://www.ghostscript.com/) (AGPL-3.0), [Avahi](https://avahi.org/)
+(LGPL-2.1) and [tini](https://github.com/krallin/tini) (MIT). Each image includes an SBOM.
+Debian's copyright files are under `/usr/share/doc/*/copyright` in the image.
