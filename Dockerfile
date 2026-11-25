@@ -11,8 +11,12 @@ LABEL org.opencontainers.image.title="virtual-cups-printer" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 
+# The base is pinned by digest for a reproducible starting point; `upgrade` applies current
+# Debian security updates on every build (incl. the weekly release rebuild). Package versions
+# are deliberately unpinned (DL3008) so security updates are picked up.
 # hadolint ignore=DL3008
 RUN apt-get update \
+ && apt-get -y upgrade \
  && apt-get install -y --no-install-recommends \
       avahi-daemon \
       cups \
