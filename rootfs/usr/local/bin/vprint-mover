@@ -18,6 +18,9 @@ readonly POLL_SECONDS=${VPRINT_MOVER_POLL_SECONDS:-1}
 # Leftover temporary files older than this are from a crashed publisher. A live publish holds
 # its temporary file for milliseconds, so this never touches another container's in-flight copy.
 readonly PARTIAL_MAX_AGE_MIN=10
+# A staged PDF with no .done/.failed marker that hasn't changed for this long was cut off
+# mid-conversion (e.g. the container was killed) and will never be finished.
+readonly ORPHAN_MAX_AGE_MIN=60
 mode=$(printf '%04o' $((0666 & ~8#${UMASK})))
 # Health signals for vprint-healthcheck: STUCK exists while some file can't be claimed or
 # published (its mtime is when that started); HEARTBEAT is touched every loop.
@@ -92,7 +95,7 @@ sanitize() {
   [[ $s =~ ^(.+)\.($DOC_EXTENSIONS)$ ]] && s=${BASH_REMATCH[1]}
   shopt -u nocasematch
   # Truncate by bytes, then drop any multi-byte character cut in half.
-  s=$(printf '%s' "$s" | head -c 100 | iconv -f UTF-8 -t UTF-8 -c)
+  s=$(printf '%s' "$s" | head -c 100 | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)
   # Dropping the extension or truncating can expose a trailing space or dot again.
   s=$(sed -E 's/[ .]+$//' <<<"$s")
   printf '%s' "${s:-untitled}"
@@ -153,11 +156,19 @@ publish() {
   log "saved ${target}"
 }
 
-# A crash mid-publish can leave a temporary file behind; it was never visible under its final
-# name and the source is still staged (if staging survived), so drop it once it is stale.
-sweep_partials() {
+# Periodic clean-up of leftovers from crashes:
+# - temporary files in OUTPUT_DIR: never visible under their final name, and the source is
+#   still claimed in staging, so they can go once stale;
+# - incomplete PDFs in staging (/var/spool may be a volume, so they would pile up for good).
+sweep() {
+  local f
   find "$OUTPUT_DIR" -maxdepth 1 -name '.*.vprint-partial' -type f -mmin "+$PARTIAL_MAX_AGE_MIN" \
     -delete 2>/dev/null || true
+  while IFS= read -r -d '' f; do
+    [[ -e $f.done || -e $f.failed ]] && continue
+    log "removing an incomplete PDF left in staging by an interrupted conversion: $(sanitize "${f##*/}")"
+    rm -f "$f"
+  done < <(find "$VPRINT_STAGING_DIR" -maxdepth 1 -type f -name '*.pdf' -mmin "+$ORPHAN_MAX_AGE_MIN" -print0 2>/dev/null)
   next_sweep=$((SECONDS + PARTIAL_MAX_AGE_MIN * 60))
 }
 
@@ -169,12 +180,12 @@ for _ in $(seq 1 30); do
   scheduler_up && break
   sleep 1
 done
-sweep_partials
+sweep
 # Empty claim directories are left by a crash between publishing and clean-up.
 find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name "${CLAIM_PREFIX}*" -empty -delete 2>/dev/null || true
 log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
 while :; do
-  ((SECONDS < next_sweep)) || sweep_partials
+  ((SECONDS < next_sweep)) || sweep
   for failed in "$VPRINT_STAGING_DIR"/*.failed; do
     name=${failed##*/}
     name=${name%.failed}
@@ -196,9 +207,11 @@ while :; do
     else
       rm -f "$marker"
     fi
+    : >"$HEARTBEAT" # per file: a slow cupsd can make one pass take minutes
   done
   for claimed in "$VPRINT_STAGING_DIR/$CLAIM_PREFIX"*/*; do
     publish "$claimed" || true
+    : >"$HEARTBEAT"
   done
   warned=()
   for f in "${!failing[@]}"; do warned[$f]=1; done

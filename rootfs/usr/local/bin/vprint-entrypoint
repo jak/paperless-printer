@@ -74,6 +74,7 @@ validate() {
   PUID=$((10#$PUID)) PGID=$((10#$PGID))
   ((PUID != 0 && PGID != 0)) || die "PUID/PGID 0 (root) is not supported"
   [[ $UMASK =~ ^0?[0-7]{3}$ ]] || die "UMASK must be octal, e.g. 0022 (got '$UMASK')"
+  (((8#$UMASK & 8#400) == 0)) || die "UMASK $UMASK would make the PDFs unreadable by their owner"
   [[ $OUTPUT_LABEL =~ ^[012]$ ]] || die "OUTPUT_LABEL must be 0, 1 or 2"
   [[ $OUTPUT_DIR == /* && $OUTPUT_DIR != *[[:cntrl:]]* ]] || die "OUTPUT_DIR must be an absolute path"
   OUTPUT_DIR=$(realpath -m -- "$OUTPUT_DIR")
@@ -119,8 +120,9 @@ setup_users() {
   [[ $password != *[[:cntrl:]]* ]] || die "the admin password must be a single line without control characters"
   # The account files are fresh from the image at every start, so an existing name is a built-in
   # system account (nobody, www-data, ...): it would get the password but not admin rights.
-  if id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1; then
-    die "CUPS_ADMIN_USER '$CUPS_ADMIN_USER' is an existing system account; choose another name"
+  # useradd also creates a same-named group, so a group-only name (staff, users) collides too.
+  if id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1 || getent group "$CUPS_ADMIN_USER" >/dev/null; then
+    die "CUPS_ADMIN_USER '$CUPS_ADMIN_USER' is an existing system account or group; choose another name"
   fi
   useradd --prefix "$ACCOUNTS_ROOT" --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
     --groups lpadmin "$CUPS_ADMIN_USER"
@@ -173,6 +175,7 @@ render_config() {
   [[ -n $CUPS_ALLOW_DIRECTIVES ]] || die "CUPS_ALLOW_FROM must not be empty (use 'all' to allow everyone)"
   CUPS_ALLOW_DIRECTIVES=${CUPS_ALLOW_DIRECTIVES%$'\n'}
   read -r -a addrs <<<"$CUPS_SERVER_ALIAS"
+  ((${#addrs[@]})) || die "CUPS_SERVER_ALIAS must not be empty (use '*' to accept any host name)"
   for addr in ${addrs[@]+"${addrs[@]}"}; do
     [[ $addr =~ ^[A-Za-z0-9.:*_-]+$ ]] || die "CUPS_SERVER_ALIAS entry '$addr' is not a host name"
   done

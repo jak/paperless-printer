@@ -77,7 +77,12 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - The healthcheck now detects a stopped scheduler and a disabled queue reliably, and only reports
   stuck output when publishing is actually failing (not during a burst of jobs).
 - PDFs finished while cupsd is starting wait for their title instead of being saved as `untitled`.
-- CUPS's self-signed certificate survives restarts (kept with the spool).
+- CUPS's self-signed certificate survives restarts (kept with the spool; a recreated container
+  needs a fixed `hostname:` to keep it).
+- Clearer start-up errors for an admin name that is an existing group, an empty
+  `CUPS_SERVER_ALIAS`, and a `UMASK` that would make PDFs unreadable by their owner.
+- PDFs cut off mid-conversion (e.g. the container was killed) are removed from staging after an
+  hour instead of piling up.
 - Scheduled rebuilds can no longer move `latest`/`X`/`X.Y` back to an older release, and carry the
   release tag's commit as their revision.
 - A Debian snakeoil TLS private key, identical in every copy of the image, is no longer

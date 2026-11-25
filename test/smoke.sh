@@ -32,7 +32,7 @@ cleanup() {
   docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" "$VOL-spool" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  rm -f "${SECRET_FILE:-}" "${SECRET_FILE:-}.cfg"
+  [[ -z ${SECRET_FILE:-} ]] || rm -f "$SECRET_FILE" "$SECRET_FILE.cfg"
 }
 trap cleanup EXIT
 
@@ -187,6 +187,9 @@ invalid_config "empty TZ" "is not a known time zone" -e TZ=
 invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/
 invalid_config "OUTPUT_DIR escaping via .." "OUTPUT_DIR must not be" -e OUTPUT_DIR=/mnt/../etc/x
 invalid_config "an existing system account as admin" "is an existing system account" -e CUPS_ADMIN_USER=nobody
+invalid_config "an existing group name as admin" "is an existing system account or group" -e CUPS_ADMIN_USER=staff
+invalid_config "an empty CUPS_SERVER_ALIAS" "CUPS_SERVER_ALIAS must not be empty" -e CUPS_SERVER_ALIAS=
+invalid_config "a UMASK that hides PDFs from their owner" "would make the PDFs unreadable" -e UMASK=0777
 invalid_config "a multi-line admin password" "must be a single line" -e CUPS_ADMIN_PASSWORD="$(printf 'one\nroot:two')"
 invalid_config "ADVERTISED_HOST with a space" "is not a host name or IP" -e ADVERTISED_HOST="bad host"
 # Run from /etc so a glob like '*.conf' would match files if the list were word-split unquoted.
@@ -231,7 +234,9 @@ tls_cert() { docker exec "$SERVER-stuck" sh -c 'lpstat -E -h localhost:631 -r >/
 cert_before=$(tls_cert)
 # (Deleted while stopped: cupsd writes its job history back on shutdown.)
 docker stop -t 5 "$SERVER-stuck" >/dev/null
-docker run --rm -v "$VOL-spool:/var/spool" --entrypoint '' "$IMAGE" sh -c 'rm -f /var/spool/cups/c* /var/spool/cups/d*'
+# Also leave an incomplete PDF from an interrupted conversion (no .done marker, long unchanged).
+docker run --rm -v "$VOL-spool:/var/spool" --entrypoint '' "$IMAGE" sh -c \
+  'rm -f /var/spool/cups/c* /var/spool/cups/d* && echo partial >/var/spool/vprint/Orphan-job_99.pdf && touch -d "-2 hours" /var/spool/vprint/Orphan-job_99.pdf'
 docker start "$SERVER-stuck" >/dev/null
 for _ in $(seq 1 30); do
   (($(docker logs "$SERVER-stuck" 2>&1 | grep -c 'vprint-mover: watching') >= 2)) && break
@@ -244,6 +249,8 @@ for _ in $(seq 1 20); do
 done
 claimed() { docker exec "$SERVER-stuck" find /var/spool/vprint -path '*/.vprint-claim.*/*' -type f "$@"; }
 check "the TLS certificate survives a restart" test "$(tls_cert)" = "$cert_before"
+check "an interrupted conversion's leftover is removed from staging" bash -c \
+  "! docker exec '$SERVER-stuck' test -e /var/spool/vprint/Orphan-job_99.pdf && docker logs '$SERVER-stuck' 2>&1 | grep -q 'removing an incomplete PDF.*Orphan-job_99'"
 check "queued PDF survives a restart and keeps its title" \
   test "$(claimed -printf '%f\n' | grep -cx 'Stuck Job-job_1.pdf')" = 2
 check "a reused job id does not overwrite the queued PDF" \

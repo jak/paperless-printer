@@ -114,7 +114,9 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
   A tmpfs at `/var/spool` also works, but then queued PDFs are lost on restart.
 - No TLS private key ships in the image: CUPS generates a self-signed certificate per
   container on first use and keeps it in `/var/spool/cups-tls`, so it survives restarts while
-  `/var/spool` is kept.
+  `/var/spool` is kept. The certificate is named after the container's host name: a recreated
+  container gets a new random host name, and so a new certificate, unless you set `hostname:`
+  (not possible with host networking).
 - `CUPS_SERVER_ALIAS=*` is the default because CUPS otherwise rejects every Host header except
   `localhost`, including the container's own IP. It weakens CUPS's DNS-rebinding protection for
   the *read-only* pages; admin actions still need TLS plus credentials. If you know every name
