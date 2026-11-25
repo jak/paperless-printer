@@ -1,0 +1,50 @@
+#!/bin/sh
+# Ghostscript wrapper used by cups-pdf (GhostScript setting). cups-pdf ignores Ghostscript's
+# exit status, so a failed conversion would otherwise look like a successful job with no PDF.
+# On failure, leave "<output>.failed" with Ghostscript's messages in the staging directory;
+# vprint-mover reports it in the container log. The report has the same owner as the PDF
+# (both are this job's), which is how vprint-mover tells genuine reports from planted ones.
+out=
+for arg in "$@"; do
+  case $arg in
+    -sOutputFile=*) out=${arg#-sOutputFile=} ;;
+  esac
+done
+# Ghostscript's messages go to a temporary file so they can be quoted in the report. If even
+# that can't be created (e.g. /tmp is full), run it anyway: a failure must still be reported.
+err=$(mktemp 2>/dev/null) || err=
+# pdfwrite writes most of the file when it finishes, so during a long conversion the output's
+# mtime would look stale; vprint-mover removes stale unfinished files as interrupted. Keep it
+# fresh while Ghostscript runs.
+keeper=
+if [ -n "$out" ]; then
+  # Short sleeps and no inherited output: once killed, nothing lingers holding cups-pdf's pipes.
+  # $$ is this wrapper even inside the subshell: stop as soon as it is gone, however it ended
+  # (a cancelled job may kill it before it reaches the kill below).
+  (n=0; while sleep 5 && kill -0 $$ 2>/dev/null; do
+    n=$((n + 1))
+    [ $((n % 60)) -ne 0 ] || touch -c "$out" 2>/dev/null
+  done) </dev/null >/dev/null 2>&1 &
+  keeper=$!
+fi
+if [ -n "$err" ]; then
+  /usr/bin/gs "$@" 2>"$err"
+else
+  /usr/bin/gs "$@"
+fi
+status=$?
+[ -z "$keeper" ] || kill "$keeper" 2>/dev/null
+if [ "$status" -ne 0 ] && [ -n "$out" ]; then
+  # The partial PDF goes first, so a genuine report never has its PDF still present. The report
+  # is written under a temporary name and renamed, so vprint-mover never reads it half-written.
+  rm -f "$out"
+  {
+    echo "exit status $status"
+    if [ -n "$err" ]; then tail -n 5 "$err"; else echo "(no details: could not create a temporary file)"; fi
+  } >"$out.failed.tmp" 2>/dev/null && mv -f "$out.failed.tmp" "$out.failed"
+fi
+if [ -n "$err" ]; then
+  cat "$err" >&2
+  rm -f "$err"
+fi
+exit "$status"

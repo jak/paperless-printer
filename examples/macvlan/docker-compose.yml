@@ -1,0 +1,60 @@
+# Give the printer its own IP on the LAN with macvlan. Use this when you want several
+# printers on one host (one service each, with different PRINTER_ID/PRINTER_NAME and IPs)
+# or don't want host networking.
+#
+# Adjust parent/subnet/gateway/ipv4_address to your network, and pick an address outside
+# your router's DHCP range.
+#
+# NOTE: with macvlan the Docker host itself cannot reach the container's IP (the kernel
+# isolates macvlan children from their parent). Other devices on the LAN can. If the host
+# must print to it too, add a macvlan "shim" interface on the host:
+#   ip link add vprint-shim link eth0 type macvlan mode bridge
+#   ip addr add 192.168.0.250/32 dev vprint-shim && ip link set vprint-shim up
+#   ip route add 192.168.0.12/32 dev vprint-shim
+services:
+  printer:
+    image: ghcr.io/jak/virtual-cups-printer:2
+    restart: unless-stopped
+    hostname: paperless-printer       # advertised as paperless-printer.local
+    networks:
+      lan:
+        ipv4_address: 192.168.0.12
+    environment:
+      PRINTER_ID: Paperless_Printer
+      PRINTER_NAME: Paperless Printer
+      ADVERTISED_HOST: 192.168.0.12   # adds an admin URL to the Bonjour record
+      # Only accept connections from the local network(s). Printing is anonymous, so without
+      # this anyone who can reach port 631 could drop documents into the output folder.
+      CUPS_ALLOW_FROM: "@LOCAL"
+      CUPS_ADMIN_PASSWORD_FILE: /run/secrets/cups_admin_password
+    secrets:
+      - cups_admin_password
+    volumes:
+      - ./output:/mnt/output
+      - spool:/var/spool
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL, NET_BIND_SERVICE, SYS_CHROOT]
+    security_opt:
+      - no-new-privileges:true
+    # Read-only root filesystem; scratch state lives in tmpfs. /var/spool is a volume so PDFs
+    # still waiting to be written to the output (e.g. while it is full) and job numbers
+    # survive restarts.
+    read_only: true
+    tmpfs: [/run, /tmp]
+
+volumes:
+  spool:
+
+networks:
+  lan:
+    driver: macvlan
+    driver_opts:
+      parent: eth0                    # your host's LAN interface
+    ipam:
+      config:
+        - subnet: 192.168.0.0/24
+          gateway: 192.168.0.1
+
+secrets:
+  cups_admin_password:
+    file: ../../admin_password.txt

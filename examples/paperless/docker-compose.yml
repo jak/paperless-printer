@@ -1,0 +1,70 @@
+# paperless-ngx with a network printer that drops every printed document straight into
+# paperless's consume directory. Print from any phone or laptop and it gets OCR'd.
+#
+#   echo 'choose-a-password' > ../../admin_password.txt
+#   docker compose up -d
+#
+# The printer writes PDFs as PUID:PGID, and paperless runs as USERMAP_UID:USERMAP_GID.
+# Keep them the same so paperless can read the files and delete them after consuming.
+services:
+  printer:
+    image: ghcr.io/jak/virtual-cups-printer:2
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PRINTER_NAME: Paperless
+      PUID: 1000
+      PGID: 1000
+      # Only accept connections from the local network(s). Printing is anonymous, so without
+      # this anyone who can reach port 631 could drop documents into the output folder.
+      CUPS_ALLOW_FROM: "@LOCAL"
+      CUPS_ADMIN_PASSWORD_FILE: /run/secrets/cups_admin_password
+    secrets:
+      - cups_admin_password
+    volumes:
+      - ./consume:/mnt/output
+      - spool:/var/spool
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL, NET_BIND_SERVICE, SYS_CHROOT]
+    security_opt:
+      - no-new-privileges:true
+    # Read-only root filesystem; scratch state lives in tmpfs. /var/spool is a volume so PDFs
+    # still waiting to be written to the output (e.g. while it is full) and job numbers
+    # survive restarts.
+    read_only: true
+    tmpfs: [/run, /tmp]
+
+  broker:
+    image: docker.io/library/redis:7.4.12
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+
+  webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.5.1
+    restart: unless-stopped
+    depends_on: [broker]
+    ports:
+      - "8000:8000"
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      USERMAP_UID: 1000
+      USERMAP_GID: 1000
+      # Printed PDFs usually already have a text layer from the print driver, which can be
+      # poor. "redo" replaces it with fresh OCR (paperless v3 values: auto, redo, force, off;
+      # use "force" if redo fails on a document).
+      PAPERLESS_OCR_MODE: redo
+    volumes:
+      - data:/usr/src/paperless/data
+      - media:/usr/src/paperless/media
+      - ./consume:/usr/src/paperless/consume
+
+volumes:
+  spool:
+  data:
+  media:
+  redisdata:
+
+secrets:
+  cups_admin_password:
+    file: ../../admin_password.txt

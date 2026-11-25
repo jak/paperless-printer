@@ -1,0 +1,445 @@
+#!/bin/bash
+# Publish finished PDFs from the cups-pdf staging directory into OUTPUT_DIR.
+#
+# As soon as cups-pdf finishes a file, it is "claimed": moved into its own directory in staging
+# under its final output name. That fixes its title while cupsd still knows the job, and frees
+# cups-pdf's name ("<title>-job_<id>.pdf") so a later job reusing the id can't overwrite it.
+# Claimed files are copied into OUTPUT_DIR under a unique hidden temporary name with the
+# configured owner and mode, then renamed into place. rename(2) is atomic within one directory,
+# so a watcher (e.g. paperless-ngx) only ever sees complete files. Files that cannot be
+# published (e.g. read-only or full volume) stay claimed in staging and are retried.
+set -uo pipefail
+shopt -s nullglob dotglob
+
+# shellcheck source=/dev/null
+. /run/vprint/env
+
+readonly POLL_SECONDS=${VPRINT_MOVER_POLL_SECONDS:-1}
+# Leftover temporary files unchanged for this long are from a crashed publisher. A copy in
+# progress keeps updating its file's mtime, so another container's live copy isn't touched.
+readonly PARTIAL_MAX_AGE_MIN=60
+# A staged PDF with no .done/.failed marker that hasn't changed for this long was cut off
+# mid-conversion (e.g. the container was killed) and will never be finished.
+readonly ORPHAN_MAX_AGE_MIN=60
+mode=$(printf '%04o' $((0666 & ~8#${UMASK})))
+# Health signals for vprint-healthcheck: STUCK exists while some file can't be claimed or
+# published and holds the reason (its mtime is when that started); HEARTBEAT is touched as
+# work progresses.
+readonly STUCK=/run/vprint/mover.stuck HEARTBEAT=/run/vprint/mover.heartbeat
+# Files that failed this pass / last pass (the latter so each problem is logged once).
+declare -A failing=() warned=()
+# Back-off for files that keep failing to publish (seconds), so a full or broken share isn't
+# sent a complete copy every second; and the reason each one last failed.
+declare -A retry_at=() retry_delay=() last_reason=()
+stuck_reason=
+ownership_warned=
+
+log() { printf 'vprint-mover: %s\n' "$*" >&2; }
+
+# same_owner A B: A and B (not followed if symlinks) belong to the same uid. A marker only counts
+# for the PDF it names when they match, so a forged marker can only affect files its creator
+# could already delete itself (staging is sticky).
+same_owner() { [[ $(stat -c %u -- "$1" 2>/dev/null) == "$(stat -c %u -- "$2" 2>/dev/null)" ]]; }
+
+# Note a file that can't make progress; log the reason only when it first starts failing.
+blocked() {
+  failing[$1]=1
+  stuck_reason=$2
+  [[ -n ${warned[$1]:-} ]] || log "$2"
+}
+
+# copy_with_heartbeat SRC DEST: cp, keeping HEARTBEAT fresh while DEST keeps growing (a large
+# copy to a slow share can outlast the healthcheck's limit). A copy that stops making progress
+# (e.g. a share that went away) lets the heartbeat go stale, so the container turns unhealthy.
+copy_with_heartbeat() {
+  local dest=$2 keeper rc
+  (last=-1
+    while kill -0 $$ 2>/dev/null; do
+      size=$(stat -c %s "$dest" 2>/dev/null || echo -1)
+      ((size == last)) || : >"$HEARTBEAT"
+      last=$size
+      sleep 10
+    done) </dev/null >/dev/null 2>&1 &
+  keeper=$!
+  cp -- "$1" "$dest"
+  rc=$?
+  kill "$keeper" 2>/dev/null
+  return "$rc"
+}
+
+# lpstat -r exits 0 either way; only the text tells whether cupsd is up.
+scheduler_up() { [[ $(lpstat -r 2>/dev/null) == "scheduler is running" ]]; }
+
+# place TMP NAME: rename TMP into OUTPUT_DIR as NAME, or NAME-1, NAME-2... if taken.
+# --update=none-fail never replaces an existing file (atomic no-replace rename), so a file
+# created concurrently by another writer can't be clobbered. Prints the final path; on an
+# error other than a name clash, prints the error and returns 2; returns 3 if TMP vanished.
+place() {
+  local tmp=$1 name=$2 base ext n=0 target err retried=
+  base=${name%.*}
+  ext=${name##*.}
+  [[ $base == "$name" ]] && ext= || ext=".$ext"
+  target="$OUTPUT_DIR/$name"
+  # -T: never move into a directory that happens to have the target's name.
+  until err=$(mv -T --update=none-fail "$tmp" "$target" 2>&1); do
+    [[ -e $tmp ]] || return 3
+    # Only an existing target is a clash; anything else (permissions, a filesystem without
+    # no-replace renames) would fail the same way for every suffix.
+    if [[ ! -e $target && ! -L $target ]]; then
+      # It may just have been consumed (deleted) since the rename failed: try the same name
+      # once more before calling it an error.
+      [[ -z $retried ]] && { retried=1; continue; }
+      printf '%s' "$err"
+      return 2
+    fi
+    retried=
+    n=$((n + 1))
+    ((n < 200)) || return 1
+    # NAME-1 ... NAME-99, then a time-and-random suffix: no long linear scan (and no hard
+    # ceiling) in a folder that already holds many files with the same title.
+    if ((n < 100)); then
+      target="$OUTPUT_DIR/${base}-${n}${ext}"
+    else
+      target="$OUTPUT_DIR/${base}-$(date +%Y%m%d-%H%M%S)-${RANDOM}${ext}"
+    fi
+  done
+  printf '%s' "$target"
+}
+
+# ipp_job ID TESTFILE -> ipptool's JSON output for the job (retried on timeout). JSON, not -l:
+# with -l, ipptool refuses to print values that fail its own checks (a job-name over 255 bytes
+# or with a newline), though cupsd stored and returns them.
+ipp_job() {
+  local out rc=1 attempt
+  for attempt in 1 2 3; do
+    out=$(timeout 5 ipptool -j "ipp://localhost/jobs/$1" "/etc/vprint/$2" 2>/dev/null)
+    rc=$?
+    ((rc == 124)) || break
+    ((attempt < 3)) && sleep 1
+  done
+  printf '%s' "$out"
+  ((rc != 124))
+}
+
+# json_attr NAME JSON -> the first string value of NAME, unescaped. (After a failed check,
+# ipptool appends its error text, so only the first, well-formed occurrence is used.)
+json_attr() {
+  local line v
+  line=$(grep -m1 -E "^[[:space:]]*\"$1\": \"" <<<"$2") || return 1
+  [[ $line =~ \"$1\":\ \"(.*)\",?$ ]] || return 1
+  v=${BASH_REMATCH[1]}
+  v=${v//\\\\/$'\x01'} # protect escaped backslashes
+  v=${v//\\\"/\"}
+  v=${v//\\\//\/}
+  v=${v//\\[nrtbf]/ }
+  # Other control characters: ipptool writes \ooo (octal); JSON's \uXXXX too. Spaces, as in sanitize.
+  v=$(sed -E 's/\\(u[0-9A-Fa-f]{4}|[0-7]{3})/ /g' <<<"$v")
+  printf '%s' "${v//$'\x01'/\\}"
+}
+
+# job_missing JSON: cupsd explicitly said the job doesn't exist (not just "no answer").
+job_missing() { grep -q '"status-message": "Job #[0-9]* does not exist' <<<"$1"; }
+
+# job_title ID -> the job-name cupsd recorded for the job (empty if unknown/untitled).
+# Fails if cupsd can't be asked (not up yet, busy past the retries, or an error), so the
+# caller can try again later instead of naming the file "untitled" for good.
+job_title() {
+  local out title
+  out=$(ipp_job "$1" get-job-name.test) || return 1
+  if title=$(json_attr job-name "$out"); then
+    [[ $title == "(stdin)" ]] && title=
+    printf '%s' "$title"
+  elif job_missing "$out"; then
+    return 0 # no such job (any more): untitled
+  else
+    return 1
+  fi
+}
+
+readonly DOC_EXTENSIONS='pdf|ps|txt|text|md|rtf|csv|tsv|html?|xml|json|eml|msg|docx?|dotx?|xlsx?|pptx?|odt|ods|odp|odg|pages|numbers|key|png|jpe?g|gif|bmp|tiff?|heic|heif|webp|svg'
+
+# sanitize TITLE -> a safe single path component: no slashes, control characters or
+# leading dots; a known document extension (".txt", ".docx") is dropped; at most 100 bytes.
+sanitize() {
+  local s=$1 LC_ALL=C.UTF-8 # so [[:cntrl:]] also covers C1 controls (U+0080-U+009F)
+  s=${s//[[:cntrl:]]/ }
+  s=${s//[\/\\:*?\"<>|]/_}
+  s=$(sed -E 's/[[:space:]]+/ /g; s/^[ .]+//; s/[ .]+$//' <<<"$s")
+  # Apps often send the document's file name as the title; drop known document extensions only,
+  # so titles like "example.com" or "No.A12" survive.
+  shopt -s nocasematch
+  [[ $s =~ ^(.+)\.($DOC_EXTENSIONS)$ ]] && s=${BASH_REMATCH[1]}
+  shopt -u nocasematch
+  # Truncate by bytes, then drop any multi-byte character cut in half.
+  s=$(printf '%s' "$s" | head -c 100 | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)
+  # Dropping the extension or truncating can expose a trailing space or dot again.
+  s=$(sed -E 's/[ .]+$//' <<<"$s")
+  printf '%s' "${s:-untitled}"
+}
+
+# output_name STAGED_NAME -> final file name, honouring OUTPUT_LABEL.
+# cups-pdf always produces "<title>-job_<id>.pdf"; the title part is unreliable, so the job's
+# real title is fetched from cupsd instead.
+output_name() {
+  local staged=$1 id title
+  if [[ $staged =~ -job_([0-9]+)\.pdf$ ]]; then
+    id=${BASH_REMATCH[1]}
+  else
+    # Not cups-pdf's "<title>-job_<id>.pdf" (it always produces that): still a safe name.
+    printf '%s.pdf' "$(sanitize "$staged")"
+    return
+  fi
+  title=$(job_title "$id") || return 1
+  title=$(sanitize "$title")
+  case $OUTPUT_LABEL in
+    0) printf '%s.pdf' "$title" ;;
+    1) printf 'job_%s-%s.pdf' "$id" "$title" ;;
+    *) printf '%s-job_%s.pdf' "$title" "$id" ;;
+  esac
+}
+
+readonly CLAIM_PREFIX=.vprint-claim.
+
+# claim SRC: move a finished cups-pdf file into a new claim directory under its output name.
+claim() {
+  local src=$1 name dir
+  name=$(output_name "${src##*/}") || return 2
+  dir=$(mktemp -d "$VPRINT_STAGING_DIR/${CLAIM_PREFIX}XXXXXXXX") || return 1
+  if ! mv -T "$src" "$dir/$name"; then
+    rmdir "$dir"
+    return 1
+  fi
+  rm -f "$src.done"
+}
+
+# publish FILE: copy a claimed file into OUTPUT_DIR under its name (de-duplicated).
+publish() {
+  local src=$1 name=${1##*/} tmp target rc
+  # Claim directories are root's own (mode 0700), so what is checked here can't change before
+  # it is copied. Staging is writable by every user in the container: never follow a symlink
+  # or anything else planted there; a claim directory root didn't create is removed.
+  if [[ ! -d ${src%/*} || -L ${src%/*} || ! -O ${src%/*} ]]; then
+    log "removing a claim directory not created by vprint-mover: $(sanitize "${src%/*}")"
+    rm -rf -- "${src%/*}"
+    return 0
+  fi
+  if [[ ! -f $src || -L $src ]]; then
+    log "ignoring a staged entry that is not a regular file: $(sanitize "$name")"
+    rm -rf -- "$src" # inside root's own claim directory, so whatever it is can go
+    rmdir "${src%/*}" 2>/dev/null || true
+    return 0
+  fi
+  # A unique temporary file per publish (mktemp uses O_EXCL), so publishers sharing an output
+  # directory can never overwrite each other's copy before it is renamed into place.
+  if ! tmp=$(mktemp --suffix=.vprint-partial "$OUTPUT_DIR/.vprint-XXXXXXXXXX" 2>/dev/null) ||
+    ! copy_with_heartbeat "$src" "$tmp" 2>/dev/null; then
+    [[ -n ${tmp:-} ]] && rm -f "$tmp"
+    blocked "$src" "cannot write to $OUTPUT_DIR (will keep retrying): $name"
+    return 1
+  fi
+  # Owner and mode are best effort: SMB/CIFS shares and root-squashed NFS refuse them, and the
+  # file is still worth delivering (it gets the share's own owner and permissions).
+  # Each applied on its own: a share that refuses chown may still allow chmod, and the mode is
+  # what lets the consumer read the file (mktemp created it 0600).
+  local applied=1
+  chown "$PUID:$PGID" "$tmp" 2>/dev/null || applied=
+  chmod "$mode" "$tmp" 2>/dev/null || applied=
+  if [[ -z $applied && -z $ownership_warned ]]; then
+    log "WARNING: cannot set owner ${PUID}:${PGID} / mode ${mode} on files in $OUTPUT_DIR (e.g. a network share); they keep the filesystem's defaults"
+    ownership_warned=1
+  fi
+  target=$(place "$tmp" "$name")
+  rc=$?
+  if ((rc != 0)); then
+    rm -f "$tmp"
+    if ((rc == 2)); then
+      blocked "$src" "cannot rename into $OUTPUT_DIR (will keep retrying): $target"
+    elif ((rc == 3)); then
+      blocked "$src" "the temporary copy of $name disappeared from $OUTPUT_DIR, e.g. removed by another container's clean-up (will retry)"
+    else
+      blocked "$src" "could not find a free file name for $name (will keep retrying)"
+    fi
+    return 1
+  fi
+  rm -f "$src"
+  rmdir "${src%/*}" 2>/dev/null || true
+  log "saved ${target}"
+}
+
+# job_state STAGED_FILE -> completed | active (pending, held or processing) | gone (aborted,
+# cancelled, no such job, or no job id in the name) | unknown (cupsd can't say right now).
+# Only an explicit answer counts: a busy or failing cupsd must not get a finished PDF deleted.
+job_state() {
+  local id out state
+  if ! [[ ${1##*/} =~ -job_([0-9]+)\.pdf$ ]]; then
+    echo gone
+    return
+  fi
+  id=${BASH_REMATCH[1]}
+  if ! out=$(ipp_job "$id" get-job-state.test); then
+    echo unknown
+  elif state=$(grep -m1 -oE '"job-state": [0-9]+' <<<"$out"); then
+    # RFC 8011 job-state: 3 pending, 4 held, 5 processing, 6 stopped, 7 canceled, 8 aborted,
+    # 9 completed.
+    case ${state##* } in
+      9) echo completed ;;
+      3 | 4 | 5 | 6) echo active ;;
+      *) echo gone ;;
+    esac
+  elif job_missing "$out"; then
+    echo gone
+  else
+    echo unknown
+  fi
+}
+
+# Periodic clean-up of leftovers from crashes:
+# - temporary files in OUTPUT_DIR: never visible under their final name, and the source is
+#   still claimed in staging, so they can go once stale;
+# - incomplete PDFs in staging (/var/spool may be a volume, so they would pile up for good).
+sweep() {
+  local f
+  find "$OUTPUT_DIR" -maxdepth 1 -name '.*.vprint-partial' -type f -mmin "+$PARTIAL_MAX_AGE_MIN" \
+    -delete 2>/dev/null || true
+  while IFS= read -r -d '' f; do
+    : >"$HEARTBEAT" # job_state can take seconds per file when cupsd is slow
+    [[ -e $f.done || -e $f.failed ]] && continue
+    # No marker yet: ask cupsd what happened to the job before deciding.
+    case $(job_state "$f") in
+      active | unknown) continue ;; # still converting, or cupsd can't say right now
+      completed)
+        # Converted, but the completion marker never got written: restore it (with the PDF's
+        # owner, as the marker check expects), and the main loop publishes it with its usual
+        # retries and health reporting.
+        log "publishing a finished PDF whose completion marker is missing: $(sanitize "${f##*/}")"
+        { : >"$f.done" && chown --reference="$f" "$f.done"; } 2>/dev/null ||
+          log "cannot restore the completion marker of $(sanitize "${f##*/}") (will retry at the next sweep)"
+        continue
+        ;;
+    esac
+    log "removing an incomplete PDF left in staging by an interrupted conversion: $(sanitize "${f##*/}")"
+    rm -f "$f"
+  done < <(find "$VPRINT_STAGING_DIR" -maxdepth 1 -type f -name '*.pdf' -mmin "+$ORPHAN_MAX_AGE_MIN" -print0 2>/dev/null)
+  # Half-written failure reports from a vprint-gs that was killed before renaming them.
+  find "$VPRINT_STAGING_DIR" -maxdepth 1 -type f -name '*.failed.tmp' -mmin "+$ORPHAN_MAX_AGE_MIN" \
+    -delete 2>/dev/null || true
+  next_sweep=$((SECONDS + PARTIAL_MAX_AGE_MIN * 60))
+}
+
+# Stop between files, never in the middle of one: exiting after a file is renamed into place
+# but before its staged copy is removed would publish it again on the next start.
+stopping=0
+trap 'stopping=1' TERM INT
+stop_if_asked() { ((stopping == 0)) || exit 0; }
+# Root-only directory for inspecting *.failed reports (staging is writable by every user).
+find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name '.vprint-private.*' -user root \
+  -exec rm -rf {} + 2>/dev/null || true
+PRIVATE=$(mktemp -d "$VPRINT_STAGING_DIR/.vprint-private.XXXXXXXX") || exit 1
+: >"$HEARTBEAT"
+rm -f "$STUCK"
+# Titles come from cupsd, so give it a moment to come up before claiming anything.
+for _ in $(seq 1 "${VPRINT_SCHEDULER_WAIT:-30}"); do
+  stop_if_asked
+  scheduler_up && break
+  sleep 1
+done
+sweep
+# Empty claim directories are left by a crash between publishing and clean-up.
+find "$VPRINT_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name "${CLAIM_PREFIX}*" -empty -delete 2>/dev/null || true
+log "watching ${VPRINT_STAGING_DIR} -> ${OUTPUT_DIR} (owner ${PUID}:${PGID}, mode ${mode})"
+while :; do
+  stop_if_asked
+  stuck_reason=
+  ((SECONDS < next_sweep)) || sweep
+  for failed in "$VPRINT_STAGING_DIR"/*.failed; do
+    name=${failed##*/}
+    name=${name%.failed}
+    id=
+    [[ $name =~ -job_([0-9]+)\.pdf$ ]] && id=${BASH_REMATCH[1]}
+    # Move the report somewhere only root can write before reading it: a symlink planted in
+    # staging must not make root read (and log) another file.
+    report=$PRIVATE/report
+    rm -rf "$report"
+    mv -T "$failed" "$report" 2>/dev/null || continue
+    # vprint-gs removes the PDF before writing its report, so a PDF still there means the report
+    # is not genuine (the owner can't tell: anonymous jobs share one user). Ignore it, so a
+    # planted report can't make root delete a PDF that is still being written.
+    pdf=${failed%.failed}
+    # A genuine report is a fresh file: one link. A hard link to another file (possible only
+    # where the host allows it, fs.protected_hardlinks=0) must not get root to read it.
+    if [[ ! -f $report || -L $report || $(stat -c %h "$report") != 1 || -e $pdf || -L $pdf ]]; then
+      log "ignoring a failure report not written for this job: $(sanitize "${failed##*/}")"
+      rm -rf "$report"
+      continue
+    fi
+    details=$(head -c 2000 "$report" | tr -s '[:cntrl:]' ' ')
+    # Titles and Ghostscript output are untrusted: sanitize so they can't forge log lines.
+    log "ERROR: PDF conversion failed for job ${id:-?} \"$(sanitize "$(job_title "${id:-0}")")\"; no file was saved: $details"
+    rm -rf "$report"
+    rm -f "${failed%.failed}" "${failed%.failed}.done"
+    : >"$HEARTBEAT"
+    stop_if_asked
+  done
+  for marker in "$VPRINT_STAGING_DIR"/*.done; do
+    src=${marker%.done}
+    if [[ -L $src ]]; then
+      # cups-pdf never writes symlinks; something else planted it. Don't follow it.
+      log "ignoring a staged entry that is not a regular file: $(sanitize "${src##*/}")"
+      rm -f "$src" "$marker"
+    elif [[ -L $marker ]] || { [[ -e $src ]] && ! same_owner "$marker" "$src"; }; then
+      # A marker by someone other than the PDF's owner could point at a PDF that is still
+      # being written: drop the marker, leave the PDF to its real one.
+      log "ignoring a completion marker not written for this job: $(sanitize "${marker##*/}")"
+      rm -f "$marker"
+    elif [[ -f $src ]]; then
+      claim "$src"
+      case $? in
+        0) ;;
+        2) blocked "$src" "cupsd is not answering; $(sanitize "${src##*/}") waits for its title (will keep retrying)" ;;
+        *) blocked "$src" "cannot claim $(sanitize "${src##*/}") in staging (will keep retrying)" ;;
+      esac
+    else
+      rm -f "$marker"
+    fi
+    : >"$HEARTBEAT" # per file: a slow cupsd can make one pass take minutes
+    stop_if_asked
+  done
+  for claimed in "$VPRINT_STAGING_DIR/$CLAIM_PREFIX"*/*; do
+    if ((SECONDS < ${retry_at[$claimed]:-0})); then
+      # Backing off: still failing, for health purposes, with its last reason.
+      failing[$claimed]=1
+      stuck_reason=${last_reason[$claimed]:-}
+      continue
+    fi
+    if publish "$claimed"; then
+      unset 'retry_at[$claimed]' 'retry_delay[$claimed]' 'last_reason[$claimed]'
+    else
+      # 2, 4, 8 ... 60 seconds between attempts.
+      d=$((${retry_delay[$claimed]:-1} * 2))
+      ((d <= 60)) || d=60
+      retry_delay[$claimed]=$d
+      retry_at[$claimed]=$((SECONDS + d))
+      last_reason[$claimed]=$stuck_reason
+    fi
+    : >"$HEARTBEAT"
+    stop_if_asked
+  done
+  # Forget back-off state for files that are gone (published, or removed by hand).
+  for f in "${!retry_at[@]}"; do
+    [[ -e $f ]] || unset 'retry_at[$f]' 'retry_delay[$f]' 'last_reason[$f]'
+  done
+  warned=()
+  for f in "${!failing[@]}"; do warned[$f]=1; done
+  failing=()
+  if ((${#warned[@]})); then
+    # Keep the reason current, but the mtime of when being stuck started.
+    printf '%s\n' "$stuck_reason" >"$STUCK.new"
+    [[ ! -e $STUCK ]] || touch -r "$STUCK" "$STUCK.new"
+    mv -f "$STUCK.new" "$STUCK"
+  else
+    rm -f "$STUCK"
+  fi
+  : >"$HEARTBEAT"
+  sleep "$POLL_SECONDS" &
+  wait $! || true
+done

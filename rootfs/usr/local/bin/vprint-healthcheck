@@ -1,0 +1,29 @@
+#!/bin/bash
+# Docker HEALTHCHECK: healthy when cupsd is up, the queue accepts jobs, and every
+# supervised helper process is alive.
+set -euo pipefail
+
+fail() { echo "unhealthy: $*" >&2; exit 1; }
+
+alive() { [[ -r $1 ]] && kill -0 "$(<"$1")" 2>/dev/null; }
+
+# lpstat -r exits 0 even when cupsd is down; only the text tells.
+[[ $(lpstat -r 2>/dev/null) == "scheduler is running" ]] || fail "cupsd is not responding"
+# Anchored: a rejecting queue prints "<id> not accepting requests", which contains the phrase.
+# Captured first: with pipefail, `lpstat | grep -q` can fail on SIGPIPE instead of the match.
+accepting=$(lpstat -a "$PRINTER_ID" 2>/dev/null || true)
+state=$(lpstat -p "$PRINTER_ID" 2>/dev/null || true)
+grep -q "^$PRINTER_ID accepting requests" <<<"$accepting" || fail "queue $PRINTER_ID is not accepting jobs"
+! grep -q "^printer $PRINTER_ID disabled" <<<"$state" || fail "queue $PRINTER_ID is disabled"
+alive /run/vprint/mover.pid || fail "vprint-mover is not running"
+# vprint-mover keeps mover.stuck while finished PDFs can't be published (e.g. the output volume
+# became read-only or full); jobs would pile up, so report it once it has lasted a while.
+older() { [[ -e $1 && -n $(find "$1" ! -newermt "-$2 seconds" 2>/dev/null) ]]; }
+# The marker holds vprint-mover's reason (an output problem, or cupsd not answering).
+! older /run/vprint/mover.stuck "${VPRINT_STUCK_SECONDS:-60}" ||
+  fail "finished PDFs are not being delivered: $(head -c 300 /run/vprint/mover.stuck) (see docker logs)"
+! older /run/vprint/mover.heartbeat 300 || fail "vprint-mover has stopped making progress"
+if [[ -e /run/vprint/avahi.pid ]]; then
+  alive /run/vprint/avahi.pid || fail "avahi-daemon is not running"
+fi
+echo healthy

@@ -1,0 +1,346 @@
+#!/bin/bash
+# Configure CUPS, cups-pdf and Avahi from environment variables, then supervise
+# cupsd, avahi-daemon and vprint-mover. If any of them exits, the container exits
+# so the restart policy can recover it.
+set -euo pipefail
+
+readonly TEMPLATES=/etc/vprint/templates
+readonly RUN_DIR=/run/vprint
+# Everything written at runtime lives under /run (plus /var/spool and /tmp), so the image
+# also runs with a read-only root filesystem. /etc/cups, /etc/avahi, /etc/papersize and the
+# account files are build-time symlinks into $RUN_DIR, seeded from DIST_DIR on each start.
+readonly DIST_DIR=/usr/local/share/vprint/dist
+readonly ACCOUNTS_ROOT=$RUN_DIR/accounts
+export VPRINT_STAGING_DIR=/var/spool/vprint
+
+log() { printf 'vprint: %s\n' "$*" >&2; }
+die() { log "ERROR: $*"; exit 64; }
+
+is_true() {
+  case "${1,,}" in
+    1 | y | yes | true | on) return 0 ;;
+    0 | n | no | false | off) return 1 ;;
+    *) die "expected yes/no, got '$1'" ;;
+  esac
+}
+
+# valid_ipv6 ADDR: a plain IPv6 literal (8 groups, or fewer with a single "::"; no zone, no
+# embedded IPv4). Rejects look-alikes such as "beef:631" (a host with a port).
+valid_ipv6() {
+  local s=$1 colons groups g
+  [[ $s =~ ^[0-9A-Fa-f:]+$ && $s != *:::* && $s != *::*::* ]] || return 1
+  [[ $s != :* || $s == ::* ]] && [[ $s != *: || $s == *:: ]] || return 1
+  colons=${s//[^:]/}
+  # 2-7 colons; 8 only when "::" stands at either end (e.g. ::1:2:3:4:5:6:7).
+  ((${#colons} >= 2 && ${#colons} <= 8)) || return 1
+  ((${#colons} < 8)) || [[ $s == ::* || $s == *:: ]] || return 1
+  IFS=: read -r -a groups <<<"$s"
+  for g in "${groups[@]}"; do ((${#g} <= 4)) || return 1; done
+  [[ $s == *::* ]] || ((${#colons} == 7))
+}
+
+xml_escape() {
+  local s=$1
+  # Quoted replacements: with bash 5.2's patsub_replacement an unquoted `&` means the match.
+  s=${s//'&'/'&amp;'}
+  s=${s//'<'/'&lt;'}
+  s=${s//'>'/'&gt;'}
+  s=${s//'"'/'&quot;'}
+  printf '%s' "$s"
+}
+
+# render TEMPLATE DEST: substitute only the listed variables so a literal `$` elsewhere survives.
+render() {
+  envsubst "$RENDER_VARS" <"$TEMPLATES/$1" >"$2"
+}
+
+read_secret() {
+  # Prefer *_FILE (Docker/compose secrets) over the plain variable.
+  local name=$1 file_var="${1}_FILE"
+  if [[ -n ${!file_var:-} ]]; then
+    [[ -r ${!file_var} ]] || die "$file_var points to unreadable file '${!file_var}'"
+    # $(<file) strips trailing newlines, which secrets files usually end with.
+    local v
+    v=$(<"${!file_var}")
+    v=${v%$'\r'} # a file saved with Windows line endings
+    # An empty file is a mistake (e.g. a `touch`ed secret), not a request for a random password.
+    [[ -n $v ]] || die "$file_var points to an empty file"
+    printf '%s' "$v"
+  else
+    printf '%s' "${!name:-}"
+  fi
+}
+
+validate() {
+  # UTF-8 so [[:cntrl:]] also matches C1 controls (U+0080-U+009F), not only ASCII ones.
+  local LC_ALL=C.UTF-8
+  [[ $PRINTER_ID =~ ^[A-Za-z0-9_-]{1,127}$ ]] ||
+    die "PRINTER_ID must be 1-127 letters, digits, '_' or '-' (got '$PRINTER_ID')"
+  local v
+  # cupsd treats '#' as a comment start (truncating Info/Location), control characters
+  # break the Avahi XML, and DNS-SD limits a service name to 63 bytes (Avahi silently drops
+  # longer ones) and each TXT record to 255 bytes.
+  for v in PRINTER_NAME PRINTER_LOCATION; do
+    [[ ${!v} != *[[:cntrl:]]* ]] || die "$v must be a single line without control characters"
+    [[ ${!v} != *'#'* ]] || die "$v must not contain '#'"
+  done
+  [[ -n $PRINTER_NAME ]] || die "PRINTER_NAME must not be empty"
+  (($(printf '%s' "$PRINTER_NAME" | wc -c) <= 63)) || die "PRINTER_NAME must be at most 63 bytes (DNS-SD limit)"
+  (($(printf '%s' "$PRINTER_LOCATION" | wc -c) <= 127)) || die "PRINTER_LOCATION must be at most 127 bytes"
+  [[ -z $PRINTER_UUID || ${PRINTER_UUID,,} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+    die "PRINTER_UUID must be a UUID like 2d1b6c3e-0d2f-4c6a-9f4e-7f0a1b2c3d4e"
+  # At most 10 digits so the arithmetic below can't overflow; then within the 32-bit id range.
+  [[ $PUID =~ ^[0-9]{1,10}$ && $PGID =~ ^[0-9]{1,10}$ ]] || die "PUID and PGID must be numeric (at most 4294967294)"
+  # Force base 10 so values like 08 aren't parsed as (invalid) octal.
+  PUID=$((10#$PUID)) PGID=$((10#$PGID))
+  ((PUID != 0 && PGID != 0)) || die "PUID/PGID 0 (root) is not supported"
+  ((PUID <= 4294967294 && PGID <= 4294967294)) || die "PUID and PGID must be numeric (at most 4294967294)"
+  [[ $UMASK =~ ^0?[0-7]{3}$ ]] || die "UMASK must be octal, e.g. 0022 (got '$UMASK')"
+  (((8#$UMASK & 8#400) == 0)) || die "UMASK $UMASK would make the PDFs unreadable by their owner"
+  [[ $OUTPUT_LABEL =~ ^[012]$ ]] || die "OUTPUT_LABEL must be 0, 1 or 2"
+  [[ $OUTPUT_DIR == /* && $OUTPUT_DIR != *[[:cntrl:]]* ]] || die "OUTPUT_DIR must be an absolute path"
+  OUTPUT_DIR=$(realpath -m -- "$OUTPUT_DIR")
+  case $OUTPUT_DIR in
+    / | /bin | /boot | /dev | /etc | /lib | /proc | /run | /sbin | /sys | /usr | /var | /var/spool | \
+      /tmp | /var/tmp | \
+      /bin/* | /boot/* | /dev/* | /etc/* | /lib/* | /proc/* | /run/* | /sbin/* | /sys/* | /usr/* | /var/spool/* | \
+      /tmp/* | /var/tmp/*)
+      die "OUTPUT_DIR must not be / or a system directory (got '$OUTPUT_DIR')" ;;
+  esac
+  [[ $CUPS_LOG_LEVEL =~ ^(none|emerg|alert|crit|error|warn|notice|info|debug|debug2)$ ]] ||
+    die "CUPS_LOG_LEVEL must be a CUPS LogLevel (warn, info, debug, ...)"
+  [[ $CUPS_ADMIN_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "CUPS_ADMIN_USER is not a valid user name"
+  case $CUPS_ADMIN_USER in
+    root | vprint | lp | daemon | avahi) die "CUPS_ADMIN_USER must not be the system account '$CUPS_ADMIN_USER'" ;;
+  esac
+  # A zone name (optionally ":"-prefixed) or path must be a real zone file ("TZif"; zoneinfo
+  # also holds tables such as zone.tab); a POSIX rule string such as EST5EDT,M3.2.0,M11.1.0
+  # is accepted as is.
+  # Empty (e.g. `TZ: ${TZ:-}` in compose) means UTC, as in most images.
+  [[ -n $TZ ]] || export TZ=UTC
+  local zone=${TZ#:}
+  [[ $zone == /* ]] || zone=/usr/share/zoneinfo/$zone
+  if ! [[ -n ${TZ#:} && $TZ != *..* && -f $zone && $(head -c4 "$zone") == TZif ]] &&
+    ! [[ $TZ =~ ^(\<[A-Za-z0-9+-]+\>|[A-Za-z]{3,})[+-]?[0-9]{1,2}(:[0-9]{2}){0,2}([A-Za-z]{3,}|\<[A-Za-z0-9+-]+\>)?([+-]?[0-9]{1,2}(:[0-9]{2}){0,2})?(,[^[:space:]]+)?$ ]]; then
+    die "TZ '$TZ' is not a known time zone"
+  fi
+  local sizes
+  sizes=$(grep -oP '^\*PageSize \K[^/]+' "$PPD_SOURCE")
+  grep -qxF -- "$PAPER_SIZE" <<<"$sizes" ||
+    die "PAPER_SIZE '$PAPER_SIZE' is not supported; choose one of: $(tr '\n' ' ' <<<"$sizes")"
+  is_true "$AVAHI_ENABLED" || true
+  is_true "$CUPS_WEB_INTERFACE" || true
+}
+
+seed_runtime() {
+  rm -rf "$RUN_DIR"
+  mkdir -p "$RUN_DIR/etc" "$RUN_DIR/log" "$ACCOUNTS_ROOT"
+  cp -a "$DIST_DIR/cups" "$DIST_DIR/avahi" "$RUN_DIR/etc/"
+  cp -a "$DIST_DIR/accounts/etc" "$ACCOUNTS_ROOT/"
+}
+
+setup_users() {
+  # The vprint account keeps uid 1000: output ownership is applied numerically from
+  # PUID/PGID by vprint-mover, so no account needs remapping.
+  local password generated=
+  password=$(read_secret CUPS_ADMIN_PASSWORD)
+  if [[ -z $password ]]; then
+    # No `tr </dev/urandom | head` pipeline: tr gets SIGPIPE, which pipefail turns into a fatal 141.
+    password=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
+    generated=1
+  fi
+  # One line, no control characters: chpasswd reads "user:password" lines, so a newline would
+  # start another entry (possibly for another account).
+  [[ $password != *[[:cntrl:]]* ]] || die "the admin password must be a single line without control characters"
+  # The account files are fresh from the image at every start, so an existing name is a built-in
+  # system account (nobody, www-data, ...): it would get the password but not admin rights.
+  # useradd also creates a same-named group, so a group-only name (staff, users) collides too.
+  if id -u "$CUPS_ADMIN_USER" >/dev/null 2>&1 || getent group "$CUPS_ADMIN_USER" >/dev/null; then
+    die "CUPS_ADMIN_USER '$CUPS_ADMIN_USER' is an existing system account or group; choose another name"
+  fi
+  useradd --prefix "$ACCOUNTS_ROOT" --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+    --groups lpadmin "$CUPS_ADMIN_USER"
+  printf '%s:%s\n' "$CUPS_ADMIN_USER" "$password" | chpasswd --prefix "$ACCOUNTS_ROOT" --crypt-method SHA512
+  if [[ -n $generated ]]; then
+    log "No CUPS_ADMIN_PASSWORD set; generated a one-off admin password for this start:"
+    log "  user: $CUPS_ADMIN_USER  password: $password"
+    log "Set CUPS_ADMIN_PASSWORD or CUPS_ADMIN_PASSWORD_FILE to keep it stable."
+  fi
+}
+
+# stored_uuid: a random UUID generated on first start and kept with the spool (a volume in the
+# compose examples), so clients keep recognising the printer across restarts while every
+# deployment gets its own, even with the default PRINTER_ID.
+# Fails (with a message) if it can't be stored: a UUID that changed on every start would make
+# clients add a new printer each time.
+stored_uuid() {
+  local f=/var/spool/vprint-state/printer-uuid u=
+  install -d -m 0755 "${f%/*}" || die "cannot create ${f%/*} to store the printer UUID"
+  [[ -s $f ]] && u=$(<"$f")
+  if ! [[ $u =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    u=$(</proc/sys/kernel/random/uuid)
+    printf '%s\n' "$u" >"$f" || die "cannot store the printer UUID in $f (set PRINTER_UUID instead)"
+  fi
+  printf '%s' "$u"
+}
+
+render_config() {
+  # Not inside ${...:-$(...)}: a failure must stop the start-up (set -e), not pass unnoticed.
+  [[ -n $PRINTER_UUID ]] || PRINTER_UUID=$(stored_uuid)
+  PRINTER_UUID=${PRINTER_UUID,,}
+  PRINTER_NAME_XML=$(xml_escape "$PRINTER_NAME")
+  PRINTER_LOCATION_XML=$(xml_escape "$PRINTER_LOCATION")
+  VPRINT_NOW=$(date +%s)
+  VPRINT_ADMINURL_RECORD=
+  if [[ -n $ADVERTISED_HOST ]]; then
+    local host=$ADVERTISED_HOST record
+    [[ $host =~ ^\[(.*)\]$ ]] && host=${BASH_REMATCH[1]}
+    if [[ $host == *:* ]]; then
+      valid_ipv6 "$host" || die "ADVERTISED_HOST '$ADVERTISED_HOST' is not a valid IPv6 address (no port: the URL uses 631)"
+      host="[$host]" # IPv6 literal: brackets are required in a URL
+    elif ! [[ $host =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+      die "ADVERTISED_HOST '$ADVERTISED_HOST' is not a host name or IP address"
+    fi
+    record="adminurl=https://$host:631/printers/${PRINTER_ID}"
+    # DNS-SD TXT records are limited to 255 bytes each.
+    ((${#record} <= 255)) || die "ADVERTISED_HOST is too long for the Bonjour admin URL"
+    VPRINT_ADMINURL_RECORD=$'\n'"    <txt-record>${record}</txt-record>"
+  fi
+  CUPS_WEB_INTERFACE=$(is_true "$CUPS_WEB_INTERFACE" && echo Yes || echo No)
+  # Split with read -a, not an unquoted expansion, so '*' or '*.lan' is never globbed against
+  # file names in the working directory. -d '' reads every line (e.g. a YAML block list).
+  local addr addrs
+  CUPS_ALLOW_DIRECTIVES=
+  read -r -d '' -a addrs <<<"$CUPS_ALLOW_FROM" || true
+  for addr in ${addrs[@]+"${addrs[@]}"}; do
+    # Names, IPv4/CIDR, @LOCAL, @IF(name), [IPv6]/prefix, *.domain, all, none.
+    [[ $addr =~ ^[][A-Za-z0-9@.:/*_()-]+$ ]] || die "CUPS_ALLOW_FROM entry '$addr' is not a CUPS address"
+    CUPS_ALLOW_DIRECTIVES+="  Allow $addr"$'\n'
+  done
+  [[ -n $CUPS_ALLOW_DIRECTIVES ]] || die "CUPS_ALLOW_FROM must not be empty (use 'all' to allow everyone)"
+  CUPS_ALLOW_DIRECTIVES=${CUPS_ALLOW_DIRECTIVES%$'\n'}
+  read -r -d '' -a addrs <<<"$CUPS_SERVER_ALIAS" || true
+  ((${#addrs[@]})) || die "CUPS_SERVER_ALIAS must not be empty (use '*' to accept any host name)"
+  for addr in "${addrs[@]}"; do
+    [[ $addr =~ ^[A-Za-z0-9.:*_-]+$ ]] || die "CUPS_SERVER_ALIAS entry '$addr' is not a host name"
+  done
+  CUPS_SERVER_ALIAS="${addrs[*]}" # one line for the ServerAlias directive
+
+  export PRINTER_ID PRINTER_NAME PRINTER_LOCATION PRINTER_UUID PRINTER_NAME_XML PRINTER_LOCATION_XML \
+    VPRINT_NOW VPRINT_ADMINURL_RECORD CUPS_WEB_INTERFACE CUPS_ALLOW_DIRECTIVES CUPS_SERVER_ALIAS \
+    CUPS_LOG_LEVEL
+  # shellcheck disable=SC2016 # literal names: envsubst only substitutes the listed variables
+  RENDER_VARS='$PRINTER_ID $PRINTER_NAME $PRINTER_LOCATION $PRINTER_UUID $PRINTER_NAME_XML $PRINTER_LOCATION_XML $VPRINT_NOW $VPRINT_ADMINURL_RECORD $CUPS_WEB_INTERFACE $CUPS_ALLOW_DIRECTIVES $CUPS_SERVER_ALIAS $CUPS_LOG_LEVEL $VPRINT_STAGING_DIR'
+
+  render cupsd.conf /etc/cups/cupsd.conf
+  render cups-pdf.conf /etc/cups/cups-pdf.conf
+  render printers.conf /etc/cups/printers.conf
+  chmod 0600 /etc/cups/printers.conf
+  # A stale PPD/printer from a previous PRINTER_ID would otherwise linger in the web UI.
+  rm -f /etc/cups/ppd/*.ppd /etc/cups/printers.conf.O
+  sed -E \
+    -e "s#^\*(DefaultPageSize|DefaultPageRegion|DefaultImageableArea|DefaultPaperDimension):.*#*\1: ${PAPER_SIZE}#" \
+    "$PPD_SOURCE" >"/etc/cups/ppd/${PRINTER_ID}.ppd"
+  chown root:lp "/etc/cups/ppd/${PRINTER_ID}.ppd"
+  chmod 0640 "/etc/cups/ppd/${PRINTER_ID}.ppd"
+  printf '%s\n' "${PAPER_SIZE,,}" >/etc/papersize
+
+  if is_true "$AVAHI_ENABLED"; then
+    render vprint.service /etc/avahi/services/vprint.service
+  else
+    rm -f /etc/avahi/services/vprint.service
+  fi
+
+  # Runtime settings for vprint-mover.
+  {
+    printf 'OUTPUT_DIR=%q\n' "$OUTPUT_DIR"
+    printf 'PUID=%q\nPGID=%q\nUMASK=%q\n' "$PUID" "$PGID" "$UMASK"
+    printf 'VPRINT_STAGING_DIR=%q\n' "$VPRINT_STAGING_DIR"
+    printf 'OUTPUT_LABEL=%q\n' "$OUTPUT_LABEL"
+  } >"$RUN_DIR/env"
+
+  log "printer '$PRINTER_NAME' (queue $PRINTER_ID, uuid $PRINTER_UUID, paper $PAPER_SIZE) -> $OUTPUT_DIR as $PUID:$PGID umask $UMASK"
+}
+
+prepare_dirs() {
+  # Staging is shared by every job user (sticky, like /tmp); only vprint-mover (root) reads it.
+  install -d -m 1733 -o root -g lpadmin "$VPRINT_STAGING_DIR"
+  # CUPS's TLS keychain (ServerKeychain); kept across restarts with the spool.
+  install -d -m 0700 -o root -g lp /var/spool/cups-tls
+  # CUPS's CacheDir (job.cache keeps the next job number), kept with the spool.
+  install -d -m 0770 -o root -g lp /var/spool/cups-cache
+  # Files are owned by PUID:PGID individually. The directory itself is only given that
+  # owner when we create it, or when it is an empty root-owned directory (a fresh Docker
+  # volume), so the consumer can delete files. An existing, populated or non-root-owned
+  # directory (e.g. a host consume folder shared with a scanner) is never re-owned.
+  if [[ ! -d $OUTPUT_DIR ]]; then
+    install -d -o "$PUID" -g "$PGID" -m 0775 "$OUTPUT_DIR"
+  elif [[ $(stat -c '%u' "$OUTPUT_DIR") == 0 && -z $(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+    chown "$PUID:$PGID" "$OUTPUT_DIR" 2>/dev/null || true
+  fi
+  # On the same filesystem as / means inside the container: PDFs would be lost on recreate.
+  if [[ $(stat -c %d "$OUTPUT_DIR") == "$(stat -c %d /)" ]]; then
+    log "WARNING: $OUTPUT_DIR is not on a mounted volume; PDFs are kept inside the container and lost when it is recreated. Mount a volume or host directory there."
+  fi
+  # cups-pdf writes its log to <Log>/cups-pdf-<queue>_log; send it to the container log.
+  ln -sf /proc/1/fd/2 "$RUN_DIR/log/cups-pdf_log"
+  ln -sf /proc/1/fd/2 "$RUN_DIR/log/cups-pdf-${PRINTER_ID}_log"
+  mkdir -p /run/cups /run/avahi-daemon /var/spool/cups/tmp
+  chown root:lp /var/spool/cups /var/spool/cups/tmp
+  chmod 0710 /var/spool/cups
+  chmod 1770 /var/spool/cups/tmp
+  rm -f /run/avahi-daemon/pid
+}
+
+pids=()
+# shellcheck disable=SC2329 # invoked via trap
+shutdown() {
+  log "stopping"
+  trap - TERM INT
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  wait
+  exit 0
+}
+
+main() {
+  PPD_SOURCE=/usr/share/ppd/cups-pdf/CUPS-PDF_noopt.ppd
+  [[ -r $PPD_SOURCE ]] || die "cups-pdf PPD not found at $PPD_SOURCE"
+  validate
+  seed_runtime
+  setup_users
+  render_config
+  prepare_dirs
+
+  # Fail fast on a broken configuration instead of crash-looping in the background.
+  /usr/sbin/cupsd -t -c /etc/cups/cupsd.conf >/dev/null || die "cupsd rejected the generated configuration"
+
+  trap shutdown TERM INT
+
+  /usr/sbin/cupsd -f &
+  pids+=($!)
+  echo $! >"$RUN_DIR/cupsd.pid"
+
+  if is_true "$AVAHI_ENABLED"; then
+    /usr/sbin/avahi-daemon --no-rlimits &
+    pids+=($!)
+    echo $! >"$RUN_DIR/avahi.pid"
+  else
+    rm -f "$RUN_DIR/avahi.pid"
+  fi
+
+  /usr/local/bin/vprint-mover &
+  pids+=($!)
+  echo $! >"$RUN_DIR/mover.pid"
+
+  local status=0
+  wait -n "${pids[@]}" || status=$?
+  # From here on this is a failure exit: a TERM arriving during clean-up must not turn it
+  # into shutdown's clean "exit 0" (restart policies like on-failure rely on the status).
+  trap - TERM INT
+  log "a supervised process exited (status $status); shutting down so the container can be restarted"
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  wait || true
+  exit $((status == 0 ? 1 : status))
+}
+
+main "$@"

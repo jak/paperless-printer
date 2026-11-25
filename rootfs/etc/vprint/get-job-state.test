@@ -1,0 +1,12 @@
+# ipptool test used by vprint-mover to ask whether a job completed.
+{
+  OPERATION Get-Job-Attributes
+  GROUP operation-attributes-tag
+  ATTR charset attributes-charset utf-8
+  ATTR naturalLanguage attributes-natural-language en
+  ATTR uri job-uri $uri
+  ATTR name requesting-user-name root
+  ATTR keyword requested-attributes job-state
+  STATUS successful-ok
+  DISPLAY job-state
+}
