@@ -15,6 +15,9 @@ services:
       PRINTER_NAME: Paperless
       PUID: 1000
       PGID: 1000
+      # Only accept connections from the local network(s). Printing is anonymous, so without
+      # this anyone who can reach port 631 could drop documents into the output folder.
+      CUPS_ALLOW_FROM: "@LOCAL"
       CUPS_ADMIN_PASSWORD_FILE: /run/secrets/cups_admin_password
     secrets:
       - cups_admin_password
@@ -29,13 +32,13 @@ services:
     tmpfs: [/run, /tmp, /var/spool]
 
   broker:
-    image: docker.io/library/redis:7
+    image: docker.io/library/redis:7.4.12
     restart: unless-stopped
     volumes:
       - redisdata:/data
 
   webserver:
-    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.5.1
     restart: unless-stopped
     depends_on: [broker]
     ports:
@@ -44,9 +47,10 @@ services:
       PAPERLESS_REDIS: redis://broker:6379
       USERMAP_UID: 1000
       USERMAP_GID: 1000
-      # Printed PDFs often already contain a text layer from the print driver, which can be
-      # poor. Forcing OCR gives consistent search results.
-      PAPERLESS_OCR_MODE: force
+      # Printed PDFs usually already have a text layer from the print driver, which can be
+      # poor. "redo" replaces it with fresh OCR (paperless v3 values: auto, redo, force, off;
+      # use "force" if redo fails on a document).
+      PAPERLESS_OCR_MODE: redo
     volumes:
       - data:/usr/src/paperless/data
       - media:/usr/src/paperless/media

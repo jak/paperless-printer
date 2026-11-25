@@ -3,8 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-HADOLINT_IMAGE=hadolint/hadolint:v2.15.1
-SHELLCHECK_IMAGE=koalaman/shellcheck:v0.11.0
+# Tool versions live in test/tools/Dockerfile so Dependabot keeps them current.
+tool_image() { awk -v t="$1" '$1 == "FROM" && $4 == t { print $2 }' test/tools/Dockerfile; }
+HADOLINT_IMAGE=$(tool_image hadolint)
+SHELLCHECK_IMAGE=$(tool_image shellcheck)
+ACTIONLINT_IMAGE=$(tool_image actionlint)
 status=0
 run() { printf '\n== %s\n' "$1"; shift; if "$@"; then echo "ok"; else echo "FAILED"; status=1; fi; }
 
@@ -19,7 +22,10 @@ shell_scripts=(
 )
 
 run "hadolint Dockerfile" docker run --rm -i "$HADOLINT_IMAGE" hadolint - <Dockerfile
+run "hadolint test/tools/Dockerfile" docker run --rm -i "$HADOLINT_IMAGE" hadolint - <test/tools/Dockerfile
 run "shellcheck" docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" --severity=style "${shell_scripts[@]}"
+# shellcheck disable=SC2016 # expanded by the inner bash
+run "actionlint (GitHub workflows)" docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color
 # shellcheck disable=SC2016 # expanded by the inner bash
 run "scripts are executable" bash -c 'for f in "$@"; do [[ -x $f ]] || { echo "not executable: $f"; exit 1; }; done' _ "${shell_scripts[@]}"
 

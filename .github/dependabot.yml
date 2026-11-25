@@ -7,6 +7,20 @@ updates:
       interval: weekly
     commit-message:
       prefix: "build(deps)"
+  # Lint tool versions (test/tools/Dockerfile, read by test/lint.sh).
+  - package-ecosystem: docker
+    directory: /test/tools
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+  # Images referenced by the compose examples.
+  - package-ecosystem: docker-compose
+    directories: ["/", "/examples/*"]
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "docs(deps)"
   # SHA-pinned actions in .github/workflows.
   - package-ecosystem: github-actions
     directory: /
