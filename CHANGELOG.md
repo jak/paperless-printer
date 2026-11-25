@@ -25,6 +25,11 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
   do not persist.
 - **Base image** is Debian 13 (trixie); the old bullseye image no longer builds.
 - **The compose examples accept connections only from local networks** (`CUPS_ALLOW_FROM=@LOCAL`).
+- **The compose examples keep `/var/spool` in a named volume**, so queued PDFs and job numbers
+  survive restarts. Existing compose files with `tmpfs: [..., /var/spool]` keep working but
+  lose queued PDFs on restart.
+- **`CUPS_ADMIN_USER` must not name an existing system account** (`nobody`, `www-data`, …), and
+  the admin password must be a single line.
 
 ### Added
 - Environment variables for printer name, ID, location and UUID, paper size, time zone,
@@ -66,6 +71,9 @@ This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.
 - `CUPS_ALLOW_FROM` accepts `@IF(name)` and bracketed IPv6 addresses, and wildcard entries are
   no longer glob-expanded; `ADVERTISED_HOST` is validated and IPv6 addresses are bracketed.
 - The healthcheck fails when the queue is rejecting jobs.
+- A finished PDF waiting in staging can no longer be overwritten by a later job that reuses its
+  job number, and keeps the title it was printed with.
+- `%` in `PRINTER_NAME` is advertised literally (Avahi no longer expands `%h`).
 - Scheduled rebuilds can no longer move `latest`/`X`/`X.Y` back to an older release, and carry the
   release tag's commit as their revision.
 - A Debian snakeoil TLS private key, identical in every copy of the image, is no longer

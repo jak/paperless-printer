@@ -220,4 +220,4 @@ jobs:
           flags=(--verify-tag --generate-notes)
           [[ $PRERELEASE == true ]] && flags+=(--prerelease)
           gh release create "$TAG" "${flags[@]}" \
-            --notes "Image: \`${IMAGE}:${VERSION}\` (linux/amd64, linux/arm64). See [CHANGELOG.md](CHANGELOG.md) for upgrade notes."
+            --notes "Image: \`${IMAGE}:${VERSION}\` (linux/amd64, linux/arm64). See [CHANGELOG.md](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${TAG}/CHANGELOG.md) for upgrade notes."

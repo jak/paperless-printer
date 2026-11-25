@@ -58,7 +58,7 @@ at start with a clear message (exit code 64).
 | `OUTPUT_DIR` | `/mnt/output` | Where PDFs are written inside the container (mount a volume here). An existing directory's ownership is never changed; only a new or empty root-owned one (a fresh volume) is given to `PUID:PGID` |
 | `PUID` / `PGID` | `1000` / `1000` | Owner of the PDFs. Match the consumer (e.g. paperless `USERMAP_UID`/`USERMAP_GID`) |
 | `UMASK` | `0022` | Permission mask for PDFs (`0022` gives `0644`, `0027` gives `0640`, `0002` gives `0664`) |
-| `OUTPUT_LABEL` | `2` | File naming: `0` = `Title.pdf`, `1` = `job_7-Title.pdf`, `2` = `Title-job_7.pdf`. Name clashes get `-1`, `-2`, …; existing files are never overwritten. Job numbers restart when the container restarts ([#42](https://github.com/jak/virtual-cups-printer/issues/42)) |
+| `OUTPUT_LABEL` | `2` | File naming: `0` = `Title.pdf`, `1` = `job_7-Title.pdf`, `2` = `Title-job_7.pdf`. Name clashes get `-1`, `-2`, …; existing files are never overwritten. Job numbers continue across restarts while `/var/spool` is kept (a volume, as in the compose examples) |
 | `CUPS_ADMIN_USER` | `admin` | Admin user for the web UI and `lpadmin` |
 | `CUPS_ADMIN_PASSWORD_FILE` | | File holding the admin password (Docker secret, **preferred**) |
 | `CUPS_ADMIN_PASSWORD` | | Admin password. If neither is set, a random one is printed to the log at each start |
@@ -78,8 +78,9 @@ when the container restarts.
 client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/spool/vprint (staging)
                                                          │ PostProcessing hook marks it done
                                                          ▼
-                                        vprint-mover: copy as .name.vprint-partial,
-                                        chown PUID:PGID, chmod, rename ──▶ OUTPUT_DIR
+                              vprint-mover: claim under its final name (title from cupsd),
+                              copy as .vprint-*.vprint-partial, chown PUID:PGID, chmod,
+                              rename ──▶ OUTPUT_DIR
 ```
 
 - `tini` is PID 1. `vprint-entrypoint` validates the environment, renders the
@@ -107,9 +108,10 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
   `426 Upgrade Required`, so the password never crosses the network unencrypted.
 - No credentials are baked into the image. Passwords are stored as SHA-512 hashes at runtime.
 - The compose examples drop all capabilities except the eight CUPS, cups-pdf and Avahi need,
-  set `no-new-privileges`, and run with a **read-only root filesystem**. Runtime state lives on
-  tmpfs at `/run`, `/tmp` and `/var/spool`. Jobs are spooled in memory, which is fine for
-  documents; very large print jobs need corresponding RAM.
+  set `no-new-privileges`, and run with a **read-only root filesystem**. Scratch state lives on
+  tmpfs at `/run` and `/tmp`; `/var/spool` is a named volume so PDFs still waiting to be
+  written (for example while the output volume is full) and job numbers survive restarts.
+  A tmpfs at `/var/spool` also works, but then queued PDFs are lost on restart.
 - No TLS private key ships in the image: CUPS generates a self-signed certificate per
   container on first use.
 - `CUPS_SERVER_ALIAS=*` is the default because CUPS otherwise rejects every Host header except
