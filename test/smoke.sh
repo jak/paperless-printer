@@ -169,7 +169,8 @@ invalid_config "PRINTER_NAME over 63 bytes" "at most 63 bytes" -e PRINTER_NAME="
 invalid_config "'#' in PRINTER_NAME" "must not contain '#'" -e PRINTER_NAME="Room #2"
 invalid_config "regex-like PAPER_SIZE" "PAPER_SIZE 'A.' is not supported" -e PAPER_SIZE="A."
 invalid_config "empty TZ" "is not a known time zone" -e TZ=
-invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must be" -e OUTPUT_DIR=/
+invalid_config "OUTPUT_DIR=/" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/
+invalid_config "OUTPUT_DIR escaping via .." "OUTPUT_DIR must not be" -e OUTPUT_DIR=/mnt/../etc/x
 
 section "output directory handling"
 # An existing, populated directory (e.g. a host consume folder) must not be re-owned.
@@ -193,17 +194,21 @@ check "unwritable output dir is logged" bash -c "docker logs '$SERVER-stuck' 2>&
 
 docker run -d --name "$SERVER-sup" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} -e CUPS_ADMIN_PASSWORD=x -e OUTPUT_LABEL=0 -e PUID=08 "$IMAGE" >/dev/null
 check "second container (OUTPUT_LABEL=0) healthy" wait_healthy "$SERVER-sup"
+# A directory with the target's name must count as a clash, not as a place to move into.
+docker exec "$SERVER-sup" mkdir "/mnt/output/Dir Clash.pdf"
+printf 'dir\n' | docker exec -i "$SERVER-sup" lp -t "Dir Clash" >/dev/null
 for n in 1 2; do
   printf 'same\n' | docker exec -i "$SERVER-sup" lp -t "Same Name" >/dev/null
   # Wait for job n to be published before sending the next, so the clash is deterministic.
   for _ in $(seq 1 30); do
-    (($(docker exec "$SERVER-sup" sh -c 'ls /mnt/output | wc -l') >= n)) && break
+    (($(docker exec "$SERVER-sup" sh -c 'ls /mnt/output | wc -l') >= n + 2)) && break
     sleep 1
   done
 done
 check "PUID with a leading zero is read as decimal" test "$(docker exec "$SERVER-sup" stat -c %u "/mnt/output/Same Name.pdf")" = 8
 check "OUTPUT_LABEL=0 names by title and de-duplicates clashes" \
-  test "$(docker exec "$SERVER-sup" ls /mnt/output | LC_ALL=C sort | tr '\n' '|')" = "Same Name-1.pdf|Same Name.pdf|"
+  test "$(docker exec "$SERVER-sup" ls /mnt/output | LC_ALL=C sort | tr '\n' '|')" = "Dir Clash-1.pdf|Dir Clash.pdf|Same Name-1.pdf|Same Name.pdf|"
+check "a same-named directory is treated as a clash" test -n "$(docker exec "$SERVER-sup" find "/mnt/output/Dir Clash-1.pdf" -type f)"
 docker exec "$SERVER-sup" sh -c 'kill "$(cat /run/vprint/avahi.pid)"'
 sleep 3
 check "container exits when a supervised process dies" test "$(docker inspect -f '{{.State.Status}}' "$SERVER-sup")" = exited

@@ -74,10 +74,12 @@ validate() {
   ((PUID != 0 && PGID != 0)) || die "PUID/PGID 0 (root) is not supported"
   [[ $UMASK =~ ^0?[0-7]{3}$ ]] || die "UMASK must be octal, e.g. 0022 (got '$UMASK')"
   [[ $OUTPUT_LABEL =~ ^[012]$ ]] || die "OUTPUT_LABEL must be 0, 1 or 2"
-  [[ $OUTPUT_DIR == /?* && $OUTPUT_DIR != *[[:cntrl:]]* ]] || die "OUTPUT_DIR must be an absolute path other than /"
-  case ${OUTPUT_DIR%/} in
-    /bin | /boot | /dev | /etc | /lib | /proc | /run | /sbin | /sys | /usr | /var | /var/spool | /var/spool/vprint | /etc/* | /usr/* | /proc/* | /sys/* | /dev/*)
-      die "OUTPUT_DIR must not be a system directory (got '$OUTPUT_DIR')" ;;
+  [[ $OUTPUT_DIR == /* && $OUTPUT_DIR != *[[:cntrl:]]* ]] || die "OUTPUT_DIR must be an absolute path"
+  OUTPUT_DIR=$(realpath -m -- "$OUTPUT_DIR")
+  case $OUTPUT_DIR in
+    / | /bin | /boot | /dev | /etc | /lib | /proc | /run | /sbin | /sys | /usr | /var | /var/spool | \
+      /bin/* | /boot/* | /dev/* | /etc/* | /lib/* | /proc/* | /run/* | /sbin/* | /sys/* | /usr/* | /var/spool/*)
+      die "OUTPUT_DIR must not be / or a system directory (got '$OUTPUT_DIR')" ;;
   esac
   [[ $CUPS_LOG_LEVEL =~ ^(none|emerg|alert|crit|error|warn|notice|info|debug|debug2)$ ]] ||
     die "CUPS_LOG_LEVEL must be a CUPS LogLevel (warn, info, debug, ...)"

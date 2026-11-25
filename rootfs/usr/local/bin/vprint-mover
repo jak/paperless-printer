@@ -26,7 +26,8 @@ place() {
   ext=${name##*.}
   [[ $base == "$name" ]] && ext= || ext=".$ext"
   target="$OUTPUT_DIR/$name"
-  until mv --update=none-fail "$tmp" "$target" 2>/dev/null; do
+  # -T: never move into a directory that happens to have the target's name.
+  until mv -T --update=none-fail "$tmp" "$target" 2>/dev/null; do
     [[ -e $tmp ]] || return 1
     n=$((n + 1))
     ((n < 10000)) || return 1
