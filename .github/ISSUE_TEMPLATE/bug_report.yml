@@ -1,0 +1,42 @@
+name: Bug report
+description: Something doesn't print, isn't discovered, or the PDF is wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Image tag or commit
+      placeholder: ghcr.io/jak/virtual-cups-printer:2.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network mode
+      options: [host, macvlan, bridge (ports), other]
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Printing from (device / OS / app)
+      placeholder: iPhone 15, iOS 19, Safari
+    validations:
+      required: true
+  - type: textarea
+    id: compose
+    attributes:
+      label: docker-compose.yml (remove passwords)
+      render: yaml
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output of `docker logs <container>` around the failure
+      description: For more detail, set `CUPS_LOG_LEVEL=debug` and retry.
+      render: text
