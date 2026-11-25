@@ -308,9 +308,12 @@ sweep() {
     case $(job_state "$f") in
       active | unknown) continue ;; # still converting, or cupsd can't say right now
       completed)
-        # Converted, but the completion marker never got written: publish it after all.
+        # Converted, but the completion marker never got written: restore it (with the PDF's
+        # owner, as the marker check expects), and the main loop publishes it with its usual
+        # retries and health reporting.
         log "publishing a finished PDF whose completion marker is missing: $(sanitize "${f##*/}")"
-        claim "$f" || true
+        { : >"$f.done" && chown --reference="$f" "$f.done"; } 2>/dev/null ||
+          log "cannot restore the completion marker of $(sanitize "${f##*/}") (will retry at the next sweep)"
         continue
         ;;
     esac
@@ -359,10 +362,10 @@ while :; do
     rm -rf "$report"
     mv -T "$failed" "$report" 2>/dev/null || continue
     # vprint-gs removes the PDF before writing its report, so a PDF still there means the report
-    # is not genuine; at least it must share the PDF's owner, so another user's report can't
-    # make root delete it.
+    # is not genuine (the owner can't tell: anonymous jobs share one user). Ignore it, so a
+    # planted report can't make root delete a PDF that is still being written.
     pdf=${failed%.failed}
-    if [[ ! -f $report || -L $report ]] || { [[ -e $pdf || -L $pdf ]] && ! same_owner "$report" "$pdf"; }; then
+    if [[ ! -f $report || -L $report || -e $pdf || -L $pdf ]]; then
       log "ignoring a failure report not written for this job: $(sanitize "${failed##*/}")"
       rm -rf "$report"
       continue

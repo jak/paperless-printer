@@ -141,6 +141,13 @@ sleep 3
 check "forged markers neither publish nor delete another job's PDF" bash -c \
   "docker exec '$SERVER' test -f /var/spool/vprint/Victim-job_950.pdf && ! docker exec '$SERVER' sh -c 'ls /mnt/output | grep -q Victim' && ! docker logs '$SERVER' 2>&1 | grep -q 'conversion failed for job 950'"
 docker exec "$SERVER" rm -f /var/spool/vprint/Victim-job_950.pdf
+# Same owner (anonymous jobs share one user): a report next to a PDF that still exists is not
+# genuine either, since vprint-gs removes the PDF before reporting.
+docker exec -u 1000:1000 "$SERVER" sh -c 'cd /var/spool/vprint && echo partial >Same-job_960.pdf && : >Same-job_960.pdf.failed'
+sleep 3
+check "a failure report next to an existing PDF is ignored, even from the same user" bash -c \
+  "docker exec '$SERVER' test -f /var/spool/vprint/Same-job_960.pdf && ! docker logs '$SERVER' 2>&1 | grep -q 'conversion failed for job 960'"
+docker exec "$SERVER" rm -f /var/spool/vprint/Same-job_960.pdf
 check "symlinks planted in staging are not followed" bash -c \
   "! docker logs '$SERVER' 2>&1 | grep -q 'admin:\\\$' && ! docker exec '$SERVER' grep -rqs 'admin:' /mnt/output && ! docker exec '$SERVER' sh -c 'ls -A /var/spool/vprint | grep -qi leak'"
 # Something other than a file inside a claim directory (e.g. swapped in while the claim waited
