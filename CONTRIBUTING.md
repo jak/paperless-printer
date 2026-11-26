@@ -13,6 +13,8 @@
 | `rootfs/etc/vprint/templates/` | Config templates rendered with `envsubst` at start |
 | `test/smoke.sh` | End-to-end test: prints over IPP from a second container and checks the results |
 | `test/lint.sh` | hadolint, shellcheck, compose and XML validation |
+| `templates/paperless-printer.xml`, `ca_profile.xml`, `icon.svg`/`icon.png` | Unraid template and Community Applications profile (keep the template's variables in step with the Dockerfile's `ENV`; `test/unraid-template.py check` enforces it) |
+| `test/unraid.sh` | Starts the image with the Unraid template's settings, prints a job and re-creates the container |
 | `docs/adr/` | Architecture decisions |
 
 ## Runtime state
@@ -27,10 +29,11 @@ Don't `apt-get install` in a derived image without restoring those first.
 ```sh
 test/lint.sh                 # static checks (needs Docker + python3)
 test/smoke.sh                # builds vprint:smoke and runs the end-to-end suite (~2 min)
+test/unraid.sh               # the image as the Unraid template runs it (~1 min)
 docker build -t vprint:dev . && docker run --rm -it -p 631:631 -e CUPS_ADMIN_PASSWORD=dev vprint:dev
 ```
 
-Every behaviour change needs a smoke-test check. CI runs lint and, in parallel, builds the image and runs the smoke test on amd64 and arm64 twice: with Docker's default settings, and hardened (minimal capabilities, `no-new-privileges`, read-only root). A Trivy scan follows the build. The release workflow builds the multi-arch image once, runs the same gates against that exact image, and only then promotes its digest to the version tags.
+Every behaviour change needs a smoke-test check. CI runs lint and, in parallel, builds the image and runs the smoke test on amd64 and arm64 twice: with Docker's default settings, and hardened (minimal capabilities, `no-new-privileges`, read-only root), then `test/unraid.sh`. A Trivy scan follows the build. The release workflow builds the multi-arch image once, runs the same gates against that exact image, and only then promotes its digest to the version tags.
 
 ## Commits and releases
 

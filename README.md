@@ -1,12 +1,15 @@
-# virtual-cups-printer
+# Paperless Printer
 
-[![CI](https://github.com/jak/virtual-cups-printer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jak/virtual-cups-printer/actions/workflows/ci.yml)
+[![CI](https://github.com/jak/paperless-printer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jak/paperless-printer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A network printer in a container that saves every job as a PDF. Phones, tablets and
-computers on your LAN discover it via AirPrint/Bonjour (IPP), print to it, and the PDF
-lands in a directory, for example the consume folder of
-[paperless-ngx](https://github.com/paperless-ngx/paperless-ngx).
+**Print to PDF from any device.** Paperless Printer is a network printer in a container that
+saves every job as a PDF. Phones, tablets and computers on your LAN discover it via
+AirPrint/Bonjour (IPP), print to it, and the PDF lands in a directory, for example the
+consume folder of [paperless-ngx](https://github.com/paperless-ngx/paperless-ngx). Runs with
+Docker Compose or as an [Unraid app](#unraid).
+
+Formerly `virtual-cups-printer`. Not affiliated with the paperless-ngx project.
 
 - Works with iOS/iPadOS, macOS, Windows, Android and Linux (IPP / AirPrint)
 - Colour PDFs; A4, Letter and other paper sizes
@@ -18,7 +21,7 @@ lands in a directory, for example the consume folder of
 ## Quick start
 
 ```sh
-git clone https://github.com/jak/virtual-cups-printer && cd virtual-cups-printer
+git clone https://github.com/jak/paperless-printer && cd paperless-printer
 echo 'choose-a-password' > admin_password.txt
 docker compose up -d
 ```
@@ -35,6 +38,7 @@ make Bonjour discovery work. Other set-ups:
 | [`docker-compose.yml`](docker-compose.yml) | One printer, host networking |
 | [`examples/macvlan`](examples/macvlan/docker-compose.yml) | The printer should have its own LAN IP, or you run several printers on one host |
 | [`examples/paperless`](examples/paperless/docker-compose.yml) | Feed paperless-ngx directly |
+| [Unraid template](#unraid) | Run it on Unraid |
 
 Without discovery (e.g. a bridge network with `-p 631:631`), add the printer manually as
 `ipp://<host>:631/printers/Paperless_Printer`.
@@ -42,7 +46,36 @@ Without discovery (e.g. a bridge network with `-p 631:631`), add the printer man
 **Image tags:** the newest release is rebuilt weekly with Debian security updates, under its
 exact version (`2.0.0`) and its floating tags (`2.0`, `2`, `latest`), so these tags are
 *mutable*. Older releases are not rebuilt: follow `2` or `latest` to keep getting updates, or
-pin `ghcr.io/jak/virtual-cups-printer@sha256:…` if you need a fixed image.
+pin `ghcr.io/jak/paperless-printer@sha256:…` if you need a fixed image.
+
+## Unraid
+
+[`templates/paperless-printer.xml`](templates/paperless-printer.xml) is an Unraid
+template with the same hardening as the compose examples. Until it is listed in Community
+Applications, add it from the Unraid terminal:
+
+```sh
+wget -O /boot/config/plugins/dockerMan/templates-user/my-paperless-printer.xml \
+  https://raw.githubusercontent.com/jak/paperless-printer/master/templates/paperless-printer.xml
+```
+
+Then **Docker → Add Container → Template: paperless-printer**:
+
+1. Keep **Network Type** on `br0` (or `eth0` when bridging is disabled) and set a **Fixed IP
+   address** outside your router's DHCP range. Unraid runs its own mDNS service, so AirPrint
+   discovery doesn't work on the Host network; on the Bridge network add the printer manually
+   as `ipp://<server-ip>:631/printers/Paperless_Printer` and set *Allowed clients* to `all` or
+   your LAN subnet.
+2. Set an **Admin password**.
+3. Point **Output folder** at where PDFs should go, e.g. paperless-ngx's consume folder.
+   PDFs are owned by `99:100` (`nobody:users`) with mode `0666`, Unraid's share defaults; change
+   PUID/PGID/UMASK to match another consumer.
+
+The spool (queued jobs, job numbers, the printer's UUID and TLS certificate) is kept in
+`/mnt/user/appdata/paperless-printer/spool`. With a custom network the Unraid server
+itself can't reach the printer's IP unless **Settings → Docker → Host access to custom
+networks** is enabled; other devices on the LAN can. `test/unraid.sh` starts the container
+exactly as the template does and prints a test job.
 
 ## Configuration
 
@@ -147,7 +180,7 @@ admin UI, set `PUID`/`PGID`, and stop editing `*.conf` files (use environment va
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Run `test/lint.sh` and `test/smoke.sh`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `test/lint.sh`, `test/smoke.sh` and `test/unraid.sh`.
 [Architecture decisions](docs/adr) are recorded as ADRs.
 
 ## License
