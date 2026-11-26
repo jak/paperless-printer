@@ -50,16 +50,26 @@ pin `ghcr.io/jak/paperless-printer@sha256:…` if you need a fixed image.
 
 ## Unraid
 
-[`templates/paperless-printer.xml`](templates/paperless-printer.xml) is an Unraid
-template with the same hardening as the compose examples. Until it is listed in Community
-Applications, add it from the Unraid terminal:
+Paperless Printer is listed in
+[Community Applications](https://ca.unraid.net/apps/paperless-printer-1obsldt0wkll25). Search
+the **Apps** tab for *Paperless Printer* and click **Install**. The template
+([`templates/paperless-printer.xml`](templates/paperless-printer.xml)) has the same hardening
+as the compose examples.
+
+<details>
+<summary>Without Community Applications</summary>
+
+Add the template from the Unraid terminal, then use **Docker → Add Container → Template:
+paperless-printer**:
 
 ```sh
 wget -O /boot/config/plugins/dockerMan/templates-user/my-paperless-printer.xml \
   https://raw.githubusercontent.com/jak/paperless-printer/master/templates/paperless-printer.xml
 ```
 
-Then **Docker → Add Container → Template: paperless-printer**:
+</details>
+
+On the settings page:
 
 1. Keep **Network Type** on `br0` (or `eth0` when bridging is disabled) and set a **Fixed IP
    address** outside your router's DHCP range. Unraid runs its own mDNS service, so AirPrint
