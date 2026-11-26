@@ -1,4 +1,4 @@
-# virtual-cups-printer: a network printer that saves every job as a PDF.
+# Paperless Printer: print to PDF from any device. A network printer that saves every job as a PDF.
 #
 #   1. echo 'choose-a-password' > admin_password.txt
 #   2. docker compose up -d
@@ -9,7 +9,7 @@
 # see examples/paperless.
 services:
   printer:
-    image: ghcr.io/jak/virtual-cups-printer:2
+    image: ghcr.io/jak/paperless-printer:2
     # build: .            # build from source instead of pulling
     restart: unless-stopped
     network_mode: host    # needed for mDNS discovery; the web UI is on https://<host>:631

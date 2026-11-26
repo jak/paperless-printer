@@ -13,7 +13,7 @@
 | `rootfs/etc/vprint/templates/` | Config templates rendered with `envsubst` at start |
 | `test/smoke.sh` | End-to-end test: prints over IPP from a second container and checks the results |
 | `test/lint.sh` | hadolint, shellcheck, compose and XML validation |
-| `templates/virtual-cups-printer.xml`, `ca_profile.xml`, `icon.svg`/`icon.png` | Unraid template and Community Applications profile (keep the template's variables in step with the Dockerfile's `ENV`; `test/unraid-template.py check` enforces it) |
+| `templates/paperless-printer.xml`, `ca_profile.xml`, `icon.svg`/`icon.png` | Unraid template and Community Applications profile (keep the template's variables in step with the Dockerfile's `ENV`; `test/unraid-template.py check` enforces it) |
 | `test/unraid.sh` | Starts the image with the Unraid template's settings, prints a job and re-creates the container |
 | `docs/adr/` | Architecture decisions |
 

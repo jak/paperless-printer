@@ -4,9 +4,9 @@ FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af6
 ARG VERSION=dev
 ARG REVISION=unknown
 
-LABEL org.opencontainers.image.title="virtual-cups-printer" \
-      org.opencontainers.image.description="Network (AirPrint/IPP) printer that saves every job as a PDF, e.g. into a paperless-ngx consume directory" \
-      org.opencontainers.image.source="https://github.com/jak/virtual-cups-printer" \
+LABEL org.opencontainers.image.title="paperless-printer" \
+      org.opencontainers.image.description="Print to PDF from any device: a network (AirPrint/IPP) printer that saves every job as a PDF, e.g. into a paperless-ngx consume directory" \
+      org.opencontainers.image.source="https://github.com/jak/paperless-printer" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"

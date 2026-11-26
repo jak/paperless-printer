@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: Image tag or commit
-      placeholder: ghcr.io/jak/virtual-cups-printer:2.0.0
+      placeholder: ghcr.io/jak/paperless-printer:2.0.0
     validations:
       required: true
   - type: dropdown

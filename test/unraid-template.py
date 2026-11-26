@@ -16,8 +16,8 @@ import sys
 import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEMPLATE = "templates/virtual-cups-printer.xml"
-RAW = "https://raw.githubusercontent.com/jak/virtual-cups-printer/master/"
+TEMPLATE = "templates/paperless-printer.xml"
+RAW = "https://raw.githubusercontent.com/jak/paperless-printer/master/"
 # Set in the template but deliberately not given an image default.
 NO_IMAGE_DEFAULT = {"CUPS_ADMIN_PASSWORD"}
 
@@ -55,8 +55,8 @@ def check():
     icon = req("Icon")
     if not icon.startswith(RAW) or not os.path.isfile(os.path.join(ROOT, icon[len(RAW):])):
         errors.append(f"<Icon> {icon} is not a file in this repository")
-    if not re.fullmatch(r"ghcr\.io/jak/virtual-cups-printer:\d+", req("Repository")):
-        errors.append("<Repository> should follow a major-version tag, e.g. ghcr.io/jak/virtual-cups-printer:2")
+    if not re.fullmatch(r"ghcr\.io/jak/paperless-printer:\d+", req("Repository")):
+        errors.append("<Repository> should follow a major-version tag, e.g. ghcr.io/jak/paperless-printer:2")
     known = image_env() | NO_IMAGE_DEFAULT
     targets = set()
     for cfg in root.iter("Config"):
@@ -87,7 +87,7 @@ def args(name):
         if kind == "Variable":
             out += ["-e", f"{target}={val}"]
         elif kind == "Path":
-            prefix = "/mnt/user/appdata/virtual-cups-printer/"
+            prefix = "/mnt/user/appdata/paperless-printer/"
             assert val.startswith(prefix), val
             volume = name + "-" + val[len(prefix):].replace("/", "-")
             out += ["-v", f"{volume}:{target}:{cfg.get('Mode', 'rw')}"]

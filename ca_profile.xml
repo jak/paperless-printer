@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <CommunityApplications>
-  <Profile>virtual-cups-printer: a network printer that saves every job as a PDF, discovered by phones, tablets and computers through AirPrint/Bonjour. Built to feed paperless-ngx's consume folder. Report problems and ask questions on GitHub issues.</Profile>
-  <Icon>https://raw.githubusercontent.com/jak/virtual-cups-printer/master/icon.png</Icon>
-  <WebPage>https://github.com/jak/virtual-cups-printer</WebPage>
+  <Profile>Paperless Printer: print to PDF from any device. A network printer that saves every job as a PDF, discovered by phones, tablets and computers through AirPrint/Bonjour. Built to feed paperless-ngx's consume folder. Report problems and ask questions on GitHub issues.</Profile>
+  <Icon>https://raw.githubusercontent.com/jak/paperless-printer/master/icon.png</Icon>
+  <WebPage>https://github.com/jak/paperless-printer</WebPage>
 </CommunityApplications>

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the container the way Unraid does from templates/virtual-cups-printer.xml (its default
+# Start the container the way Unraid does from templates/paperless-printer.xml (its default
 # values, ExtraParams and appdata paths), print a job, and check the result survives a re-create.
 #
 # Usage: test/unraid.sh                    # builds vprint:smoke from the working tree

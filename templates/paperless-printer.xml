@@ -1,25 +1,25 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>virtual-cups-printer</Name>
-  <Repository>ghcr.io/jak/virtual-cups-printer:2</Repository>
-  <Registry>https://github.com/jak/virtual-cups-printer/pkgs/container/virtual-cups-printer</Registry>
+  <Name>paperless-printer</Name>
+  <Repository>ghcr.io/jak/paperless-printer:2</Repository>
+  <Registry>https://github.com/jak/paperless-printer/pkgs/container/paperless-printer</Registry>
   <!-- Its own LAN IP: Unraid runs its own Avahi, which clashes with AirPrint discovery on host networking. -->
   <Network>br0</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/jak/virtual-cups-printer/issues</Support>
-  <Project>https://github.com/jak/virtual-cups-printer</Project>
-  <ReadMe>https://github.com/jak/virtual-cups-printer#unraid</ReadMe>
-  <Overview>A network printer that saves every job as a PDF. Phones, tablets and computers on your LAN find it through AirPrint/Bonjour, print to it, and the PDF appears in a folder, for example the consume folder of paperless-ngx. PDFs appear only once complete, with the owner and permissions you choose, and are named after the document title.
+  <Support>https://github.com/jak/paperless-printer/issues</Support>
+  <Project>https://github.com/jak/paperless-printer</Project>
+  <ReadMe>https://github.com/jak/paperless-printer#unraid</ReadMe>
+  <Overview>Print to PDF from any device. Paperless Printer is a network printer that saves every job as a PDF. Phones, tablets and computers on your LAN find it through AirPrint/Bonjour, print to it, and the PDF appears in a folder, for example the consume folder of paperless-ngx. PDFs appear only once complete, with the owner and permissions you choose, and are named after the document title.
 
 Networking: keep Network Type on a custom network (br0, or eth0 when bridging is disabled) and set a Fixed IP address outside your router's DHCP range, so discovery works. On the Bridge or Host network, discovery does not work (Unraid runs its own mDNS service); add the printer manually as ipp://SERVER-IP:631/printers/Paperless_Printer instead.
 
 Set an admin password, then print to "Paperless Printer". The CUPS admin pages are at https://CONTAINER-IP:631/admin (self-signed certificate).</Overview>
   <Category>Productivity: Tools:Utilities</Category>
   <WebUI>https://[IP]:[PORT:631]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/jak/virtual-cups-printer/master/templates/virtual-cups-printer.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/jak/virtual-cups-printer/master/icon.png</Icon>
-  <ExtraSearchTerms>cups printer pdf airprint paperless ipp scan</ExtraSearchTerms>
+  <TemplateURL>https://raw.githubusercontent.com/jak/paperless-printer/master/templates/paperless-printer.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/jak/paperless-printer/master/icon.png</Icon>
+  <ExtraSearchTerms>print to pdf virtual printer pdf printer cups airprint ipp paperless-ngx scan</ExtraSearchTerms>
   <!-- Least privilege and a read-only root, as in the compose examples. The fixed hostname keeps
        CUPS's self-signed certificate (stored in the spool) valid when the container is recreated. -->
   <ExtraParams>--hostname=paperless-printer --cap-drop=ALL --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=FOWNER --cap-add=SETUID --cap-add=SETGID --cap-add=KILL --cap-add=NET_BIND_SERVICE --cap-add=SYS_CHROOT --security-opt=no-new-privileges:true --read-only --tmpfs=/run --tmpfs=/tmp</ExtraParams>
@@ -27,8 +27,8 @@ Set an admin password, then print to "Paperless Printer". The CUPS admin pages a
   <License>MIT</License>
   <Requires>A custom network (br0 or eth0) with a fixed IP for AirPrint/Bonjour discovery.</Requires>
   <Config Name="IPP and web UI port" Target="631" Default="631" Mode="tcp" Description="IPP printing and the CUPS web UI (HTTPS for admin pages). Only used on the Bridge network; on br0 the printer listens on 631 at its own IP." Type="Port" Display="always" Required="true" Mask="false">631</Config>
-  <Config Name="Output folder" Target="/mnt/output" Default="/mnt/user/appdata/virtual-cups-printer/output" Mode="rw" Description="Where finished PDFs are saved. Point it at paperless-ngx's consume folder to import every print." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/virtual-cups-printer/output</Config>
-  <Config Name="Spool" Target="/var/spool" Default="/mnt/user/appdata/virtual-cups-printer/spool" Mode="rw" Description="Queued jobs, job numbers, the printer's UUID and its TLS certificate, kept across restarts and updates." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/virtual-cups-printer/spool</Config>
+  <Config Name="Output folder" Target="/mnt/output" Default="/mnt/user/appdata/paperless-printer/output" Mode="rw" Description="Where finished PDFs are saved. Point it at paperless-ngx's consume folder to import every print." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/paperless-printer/output</Config>
+  <Config Name="Spool" Target="/var/spool" Default="/mnt/user/appdata/paperless-printer/spool" Mode="rw" Description="Queued jobs, job numbers, the printer's UUID and its TLS certificate, kept across restarts and updates." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/paperless-printer/spool</Config>
   <Config Name="Admin password" Target="CUPS_ADMIN_PASSWORD" Default="" Description="Password for the CUPS admin pages (single line). If empty, a random password is printed to the log at each start." Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="Printer name" Target="PRINTER_NAME" Default="Paperless Printer" Description="Name shown to clients (at most 63 bytes, no #)." Type="Variable" Display="always" Required="true" Mask="false">Paperless Printer</Config>
   <Config Name="Printer location" Target="PRINTER_LOCATION" Default="" Description="Location shown to clients, e.g. Office." Type="Variable" Display="always" Required="false" Mask="false"/>

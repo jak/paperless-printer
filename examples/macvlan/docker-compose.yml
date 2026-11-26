@@ -13,7 +13,7 @@
 #   ip route add 192.168.0.12/32 dev vprint-shim
 services:
   printer:
-    image: ghcr.io/jak/virtual-cups-printer:2
+    image: ghcr.io/jak/paperless-printer:2
     restart: unless-stopped
     hostname: paperless-printer       # advertised as paperless-printer.local
     networks:
