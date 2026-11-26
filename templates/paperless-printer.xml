@@ -44,5 +44,6 @@ Set an admin password, then print to "Paperless Printer". The CUPS admin pages a
   <Config Name="Server aliases" Target="CUPS_SERVER_ALIAS" Default="*" Description="Host names clients may use. Keep * unless you list every name and IP the printer is reached by." Type="Variable" Display="advanced" Required="true" Mask="false">*</Config>
   <Config Name="Web interface" Target="CUPS_WEB_INTERFACE" Default="yes|no" Description="Set no to disable the CUPS web UI." Type="Variable" Display="advanced" Required="true" Mask="false">yes</Config>
   <Config Name="Bonjour/AirPrint" Target="AVAHI_ENABLED" Default="yes|no" Description="Set no to disable discovery (e.g. on the Bridge network)." Type="Variable" Display="advanced" Required="true" Mask="false">yes</Config>
+  <Config Name="Bonjour over IPv6" Target="AVAHI_IPV6" Default="no|yes" Description="no advertises the printer over IPv4 only. Keep no if br0 has IPv6: an IPv6 address Docker gives the container can clash with the router's, and the printer is then renamed forever (Host name conflict in the log)." Type="Variable" Display="advanced" Required="true" Mask="false">no</Config>
   <Config Name="Log level" Target="CUPS_LOG_LEVEL" Default="warn|error|info|debug" Description="CUPS log level." Type="Variable" Display="advanced" Required="true" Mask="false">warn</Config>
 </Container>

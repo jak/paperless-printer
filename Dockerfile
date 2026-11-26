@@ -77,6 +77,7 @@ ENV PRINTER_ID=Paperless_Printer \
     CUPS_SERVER_ALIAS="*" \
     CUPS_WEB_INTERFACE=yes \
     AVAHI_ENABLED=yes \
+    AVAHI_IPV6=yes \
     ADVERTISED_HOST=""
 
 # No VOLUME: OUTPUT_DIR is configurable, so mount it explicitly (a warning is logged if not).

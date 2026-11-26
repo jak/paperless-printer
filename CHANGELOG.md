@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- `AVAHI_IPV6=no` advertises the printer over IPv4 only. The Unraid template sets it: on a `br0`
+  with IPv6, an IPv6 address shared with the router (Docker can hand out the router's `::1`) or
+  an mDNS reflector made Avahi rename the printer forever (`Host name conflict, retrying with …`).
+
 ### Fixed
 - Releases no longer leave a `candidate-<run>` tag on the image: the image under test is pushed
   by digest only and gets just its version tags once it passes.

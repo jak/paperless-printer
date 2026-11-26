@@ -77,6 +77,12 @@ itself can't reach the printer's IP unless **Settings → Docker → Host access
 networks** is enabled; other devices on the LAN can. `test/unraid.sh` starts the container
 exactly as the template does and prints a test job.
 
+The template advertises over IPv4 only (`AVAHI_IPV6=no`). On a `br0` with IPv6, Docker can give
+the container the router's own IPv6 address (e.g. `<prefix>::1`, when the network's IPv6
+gateway is the router's link-local address), and Avahi then renames the printer forever
+(`Host name conflict, retrying with …`). If **Fixed IPv6 address** is shown, set it to an
+unused address so the container doesn't take the router's.
+
 ## Configuration
 
 Set these as environment variables; no rebuild is needed. Invalid values stop the container
@@ -102,6 +108,7 @@ at start with a clear message (exit code 64).
 | `CUPS_WEB_INTERFACE` | `yes` | Set `no` to disable the web UI |
 | `CUPS_LOG_LEVEL` | `warn` | `error`, `warn`, `info`, `debug`, … |
 | `AVAHI_ENABLED` | `yes` | Set `no` to disable Bonjour/AirPrint advertising |
+| `AVAHI_IPV6` | `yes` | Set `no` to advertise over IPv4 only (no IPv6 address records). Use it when the log shows `Host name conflict, retrying with …` over and over (see [Troubleshooting](#troubleshooting)); the Unraid template sets `no` |
 | `ADVERTISED_HOST` | *(empty)* | Host or IP for the admin link in the Bonjour record |
 
 Configuration comes **only** from the environment: changes made in the CUPS web UI are lost
@@ -171,6 +178,7 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
 | A job "completed" but no PDF appeared | Look for `PDF conversion failed` in `docker logs`; the message includes Ghostscript's error. |
 | Container keeps restarting | `docker logs`: configuration errors are explained and exit with code 64. |
 | `Unable to bind` / Avahi warns about another mDNS stack | With host networking the container needs port 631 and shares mDNS with the host: stop the host's own CUPS (`cups.service`) and Avahi, or use the [macvlan example](examples/macvlan) to give the printer its own IP. |
+| Log repeats `Host name conflict, retrying with <name>-2`, `-3`, … | Another device answers for one of the container's addresses, usually IPv6: Docker gave a macvlan/ipvlan container an address the router already uses (often `<prefix>::1`), or an mDNS reflector echoes the records back. Set `AVAHI_IPV6=no` to advertise over IPv4 only, and give the container a fixed IPv6 address (or fix the network's IPv6 range) so it doesn't duplicate the router's. |
 | Need more detail | `CUPS_LOG_LEVEL=debug` |
 
 ## Upgrading from v1
