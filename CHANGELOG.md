@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Paperless Printer is now listed in Unraid Community Applications. The README's Unraid section
+  installs it from the **Apps** tab; the `wget` template install is kept as a fallback.
+
 ## [2.3.0] – 2026-11-26
 
 ### Fixed
