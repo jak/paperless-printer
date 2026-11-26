@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Releases no longer leave a `candidate-<run>` tag on the image: the image under test is pushed
+  by digest only and gets just its version tags once it passes.
+
 ## [2.1.0] – 2026-11-26
 
 ### ⚠️ Renamed to Paperless Printer
