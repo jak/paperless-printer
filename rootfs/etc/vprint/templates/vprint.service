@@ -7,6 +7,10 @@
     <type>_ipp._tcp</type>
     <subtype>_universal._sub._ipp._tcp</subtype>
     <port>631</port>
+    <!-- Kept small: a legacy unicast mDNS answer (PTR, TXT, SRV and A together) must fit in 512
+         bytes, or Avahi drops records ("not fitting in legacy unicast packet"). Keys whose
+         Bonjour Printing default already says "no" (Bind, Collate, Copies, Punch, Scan, Sort,
+         Staple) are left out. -->
     <txt-record>txtvers=1</txt-record>
     <txt-record>qtotal=1</txt-record>
     <txt-record>rp=printers/${PRINTER_ID}</txt-record>
@@ -19,13 +23,6 @@
     <txt-record>URF=W8,SRGB24,CP255,RS600,DM1</txt-record>
     <txt-record>Color=T</txt-record>
     <txt-record>Duplex=F</txt-record>
-    <txt-record>Copies=F</txt-record>
-    <txt-record>Collate=F</txt-record>
-    <txt-record>Bind=F</txt-record>
-    <txt-record>Punch=0</txt-record>
-    <txt-record>Sort=F</txt-record>
-    <txt-record>Staple=F</txt-record>
-    <txt-record>Scan=F</txt-record>
     <txt-record>PaperCustom=F</txt-record>
     <txt-record>PaperMax=legal-A4</txt-record>
     <!-- Same value cupsd computes for this queue (printers.conf "Type 8400972"); includes the colour bit (0x8). -->
