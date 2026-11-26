@@ -177,6 +177,32 @@ else
   fail "colour job output missing"
 fi
 
+section "PDF jobs without options (lp, Windows, Android)"
+# Most clients send a PDF and leave colour and scaling to the printer's defaults.
+# pdf_job TITLE PAGE_W PAGE_H: print a one-page PDF with a red frame inset 10pt from the edges.
+pdf_job() {
+  # shellcheck disable=SC2016 # expanded by the client's shell
+  client sh -c 'printf "%%!PS\n<< /PageSize [%s %s] >> setpagedevice 1 0 0 setrgbcolor 4 setlinewidth 10 10 %s %s rectstroke showpage\n" \
+      "$2" "$3" "$(($2 - 20))" "$(($3 - 20))" |
+    gs -q -dSAFER -sDEVICE=pdfwrite -o - - | lp -h "$1:631" -d Paperless_Printer -t "$4" >/dev/null' _ "$SERVER" "$2" "$3" "$1"
+}
+pdf_job "Slide 16x9" 1440 810
+pdf_job "Small A5" 420 595
+pdf_out() { in_server find /mnt/output -maxdepth 1 -name "$1-job_*.pdf" -printf '/mnt/output/%f\n'; }
+for _ in $(seq 1 60); do [[ -n $(pdf_out "Slide 16x9") && -n $(pdf_out "Small A5") ]] && break; sleep 1; done
+# Content bounding box of the output page: "x0 y0 x1 y1".
+bbox() { in_server gs -q -dSAFER -dBATCH -dNOPAUSE -sDEVICE=bbox "$1" 2>&1 | awk '/^%%BoundingBox/ { print $2, $3, $4, $5 }'; }
+slide=$(pdf_out "Slide 16x9")
+small=$(pdf_out "Small A5")
+check "a colour PDF stays in colour by default" bash -c \
+  "[[ -n '$slide' ]] && docker exec '$SERVER' gs -q -o - -sDEVICE=inkcov '$slide' | awk '{ exit !((\$1+\$2+\$3) > 0) }'"
+read -r sx0 sy0 sx1 sy1 <<<"$(bbox "$slide")"
+check "a page larger than A4 is shrunk to fit, not cropped (bbox ${sx0:-?} ${sy0:-?} ${sx1:-?} ${sy1:-?})" \
+  bash -c "(( ${sx0:-0} > 20 && ${sx1:-999} < 575 && ${sy0:-0} >= 0 && ${sy1:-999} <= 842 ))"
+read -r ax0 ay0 ax1 ay1 <<<"$(bbox "$small")"
+check "a page smaller than A4 is not enlarged (bbox ${ax0:-?} ${ay0:-?} ${ax1:-?} ${ay1:-?})" \
+  bash -c "(( ${ax1:-0} - ${ax0:-0} >= 395 && ${ax1:-0} - ${ax0:-0} <= 410 ))"
+
 section "admin security"
 check "plain HTTP admin with valid creds is refused (426)" test "$(curl_code -u "admin:$ADMIN_PASSWORD" "http://$SERVER:631/admin/")" = 426
 check "HTTPS admin without creds is refused (401)" test "$(curl_code -k "https://$SERVER:631/admin/")" = 401

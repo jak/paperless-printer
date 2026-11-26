@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- PDFs printed without colour or scaling options (`lp`, Windows, some Android apps) came out in
+  greyscale, and pages larger than the paper (e.g. 16:9 slides on A4) were cropped. The queue now
+  defaults to colour and to `auto-fit`, which shrinks oversized pages to fit and leaves pages that
+  already fit untouched. iPhone and Mac jobs were not affected; they send their own settings.
 - Avahi no longer drops records from legacy unicast mDNS answers (`Record [...] not fitting in
   legacy unicast packet, dropping`, e.g. for queries from a router's mDNS proxy). The Bonjour
   TXT record leaves out keys whose default already means "no" (`Bind`, `Collate`, `Copies`,

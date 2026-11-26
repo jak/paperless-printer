@@ -173,7 +173,8 @@ client ──IPP──▶ cupsd ──▶ cups-pdf (Ghostscript) ──▶ /var/
 | Printer not discovered | Use `network_mode: host` or macvlan. Bonjour doesn't cross bridge networks or VLANs without an mDNS reflector. Check `docker logs` for `Service "…" successfully established`. |
 | Docker host can't reach a macvlan printer | Expected: macvlan isolates the host from its children. See the shim commands in [`examples/macvlan`](examples/macvlan/docker-compose.yml). |
 | paperless doesn't pick up files | `PUID`/`PGID` must match paperless's `USERMAP_UID`/`USERMAP_GID`. Check with `ls -ln` on the consume directory. |
-| PDFs are greyscale | Make sure the client has colour turned on; v2 advertises colour support. Please report the client and OS. |
+| PDFs are greyscale | Make sure the client has colour turned on; v2 advertises colour support and defaults to colour. Please report the client and OS. |
+| Landscape pages come out sideways on a portrait page | The client lays the document out on the paper before sending it: macOS Preview and iOS turn landscape pages to fit portrait A4, and the printer saves exactly what they send. Choose landscape in the print dialog, or for a PDF you already have, copy it straight into the output/consume folder instead of printing it. |
 | Poor OCR in paperless | Set `PAPERLESS_OCR_MODE=redo` (or `force`) in paperless (v3 values); printed PDFs often have a poor text layer. |
 | A job "completed" but no PDF appeared | Look for `PDF conversion failed` in `docker logs`; the message includes Ghostscript's error. |
 | Container keeps restarting | `docker logs`: configuration errors are explained and exit with code 64. |
