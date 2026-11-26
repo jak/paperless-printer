@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.1.0] – 2026-11-26
 
 ### ⚠️ Renamed to Paperless Printer
 - The project is now **paperless-printer** (`github.com/jak/paperless-printer`; the old URL
