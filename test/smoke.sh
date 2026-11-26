@@ -29,10 +29,10 @@ cleanup() {
   if ((rc != 0 || failures != 0)) && docker inspect "$SERVER" >/dev/null 2>&1; then
     echo; echo "---- server logs ----"; docker logs "$SERVER" 2>&1 | tail -60
   fi
-  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" "$SERVER-tz" >/dev/null 2>&1 || true
+  docker rm -f "$SERVER" "$SERVER-bad" "$SERVER-sup" "$SERVER-sup2" "$SERVER-stuck" "$SERVER-tz" "$SERVER-v6" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" "$VOL-ro" "$VOL-shared" "$VOL-multi" "$VOL-spool" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
-  [[ -z ${SECRET_FILE:-} ]] || rm -f "$SECRET_FILE" "$SECRET_FILE.cfg" "$SECRET_FILE.share"
+  docker network rm "$NET" "$NET-v6" >/dev/null 2>&1 || true
+  [[ -z ${SECRET_FILE:-} ]] || rm -f "$SECRET_FILE" "$SECRET_FILE.cfg" "$SECRET_FILE.share" "$SECRET_FILE.v6" "$SECRET_FILE.v4"
 }
 trap cleanup EXIT
 
@@ -242,6 +242,27 @@ invalid_config "a multi-line admin password" "must be a single line" -e CUPS_ADM
 invalid_config "ADVERTISED_HOST with a port" "is not a valid IPv6 address" -e ADVERTISED_HOST=beef:631
 invalid_config "OUTPUT_DIR=/tmp" "OUTPUT_DIR must not be" -e OUTPUT_DIR=/tmp
 invalid_config "ADVERTISED_HOST with a space" "is not a host name or IP" -e ADVERTISED_HOST="bad host"
+invalid_config "a non-boolean AVAHI_IPV6" "expected yes/no" -e AVAHI_IPV6=maybe
+
+# On a dual-stack network Avahi registers the container's IPv6 address unless AVAHI_IPV6=no.
+docker network create --ipv6 --subnet fd7e:5f1c:9d1a::/64 "$NET-v6" >/dev/null
+avahi_addresses() {
+  docker run -d --name "$SERVER-v6" --network "$NET-v6" -e CUPS_ADMIN_PASSWORD=x "$@" "$IMAGE" >/dev/null
+  for _ in $(seq 1 30); do
+    docker logs "$SERVER-v6" 2>&1 | grep -q 'successfully established' && break
+    sleep 1
+  done
+  docker logs "$SERVER-v6" 2>&1 | grep -E 'Registering new address record|successfully established'
+  docker exec "$SERVER-v6" grep -E '^(use-ipv6|publish-aaaa-on-ipv4)=' /etc/avahi/avahi-daemon.conf
+  docker rm -f "$SERVER-v6" >/dev/null
+}
+avahi_addresses >"$SECRET_FILE.v6" 2>&1 || true
+avahi_addresses -e AVAHI_IPV6=no >"$SECRET_FILE.v4" 2>&1 || true
+check "by default Avahi advertises the container's IPv6 address" grep -q 'address record for fd7e:5f1c:9d1a:' "$SECRET_FILE.v6"
+check "AVAHI_IPV6=no: the service is still published" grep -q 'successfully established' "$SECRET_FILE.v4"
+check "AVAHI_IPV6=no: no IPv6 address records, IPv4 only" bash -c \
+  "! grep -E 'address record for [0-9a-f:]*:' '$SECRET_FILE.v4' && grep -qE 'address record for [0-9.]+ on eth0' '$SECRET_FILE.v4' &&
+   grep -qx 'use-ipv6=no' '$SECRET_FILE.v4' && grep -qx 'publish-aaaa-on-ipv4=no' '$SECRET_FILE.v4'"
 # Run from /etc so a glob like '*.conf' would match files if the list were word-split unquoted.
 docker run --rm -w /etc -e CUPS_ADMIN_PASSWORD=x -e ADVERTISED_HOST=fd00::12 \
   -e CUPS_ALLOW_FROM="$(printf '@LOCAL @IF(eth0)\n[fd00::]/8\n*.conf')" --entrypoint bash "$IMAGE" -c \

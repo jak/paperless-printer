@@ -61,6 +61,7 @@ docker network create "$NAME" >/dev/null
 start
 check "container becomes healthy" wait_healthy
 check "avahi publishes the service" bash -c "docker logs '$NAME' 2>&1 | grep -q 'successfully established'"
+check "Avahi advertises over IPv4 only (AVAHI_IPV6=no)" docker exec "$NAME" grep -qx use-ipv6=no /etc/avahi/avahi-daemon.conf
 check "root filesystem is read-only" bash -c "! docker exec '$NAME' touch /usr/vprint-rw-test 2>/dev/null"
 
 section "print from the LAN (allowed by @LOCAL)"
