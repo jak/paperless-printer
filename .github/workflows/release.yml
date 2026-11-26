@@ -139,6 +139,8 @@ jobs:
         run: IMAGE="${{ needs.build-candidate.outputs.image }}" test/smoke.sh
       - name: Smoke test (hardened + read-only)
         run: IMAGE="${{ needs.build-candidate.outputs.image }}" SERVER_ARGS="$HARDENED_ARGS" test/smoke.sh
+      - name: Unraid template (its default settings)
+        run: IMAGE="${{ needs.build-candidate.outputs.image }}" test/unraid.sh
 
   scan:
     needs: [resolve, build-candidate]

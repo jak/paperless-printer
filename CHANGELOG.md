@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- An Unraid template (`templates/virtual-cups-printer.xml`), ready for Community Applications:
+  its own LAN IP on `br0` for AirPrint discovery, `nobody:users` output, the compose examples'
+  hardening, and the spool in appdata. CI starts the image with the template's settings.
+
 ## [2.0.0] – 2026-11-26
 
 This fork is now independent of zix99/virtual-cups-printer and is MIT licensed.

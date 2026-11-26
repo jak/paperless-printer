@@ -65,6 +65,8 @@ jobs:
       # exercised by the smoke test's own restart scenarios.
       - name: Smoke test (hardened + read-only, tmpfs spool)
         run: IMAGE=vprint:ci SERVER_ARGS="$HARDENED_ARGS" test/smoke.sh
+      - name: Unraid template (its default settings)
+        run: IMAGE=vprint:ci test/unraid.sh
       - name: Image size
         run: docker image ls vprint:ci --format 'vprint:ci ${{ matrix.arch }} {{.Size}}' | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Save image for scanning

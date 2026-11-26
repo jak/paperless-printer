@@ -18,6 +18,7 @@ shell_scripts=(
   rootfs/usr/local/bin/vprint-postprocess
   rootfs/usr/local/bin/vprint-gs
   test/smoke.sh
+  test/unraid.sh
   test/lint.sh
   .github/scripts/release-tags.sh
 )
@@ -44,5 +45,7 @@ run "docker compose config" compose_check
 run "avahi service template is well-formed XML" python3 -c '
 import sys, xml.dom.minidom
 xml.dom.minidom.parse(sys.argv[1])' rootfs/etc/vprint/templates/vprint.service
+
+run "Unraid template" python3 test/unraid-template.py check
 
 exit $status

@@ -35,6 +35,7 @@ make Bonjour discovery work. Other set-ups:
 | [`docker-compose.yml`](docker-compose.yml) | One printer, host networking |
 | [`examples/macvlan`](examples/macvlan/docker-compose.yml) | The printer should have its own LAN IP, or you run several printers on one host |
 | [`examples/paperless`](examples/paperless/docker-compose.yml) | Feed paperless-ngx directly |
+| [Unraid template](#unraid) | Run it on Unraid |
 
 Without discovery (e.g. a bridge network with `-p 631:631`), add the printer manually as
 `ipp://<host>:631/printers/Paperless_Printer`.
@@ -43,6 +44,35 @@ Without discovery (e.g. a bridge network with `-p 631:631`), add the printer man
 exact version (`2.0.0`) and its floating tags (`2.0`, `2`, `latest`), so these tags are
 *mutable*. Older releases are not rebuilt: follow `2` or `latest` to keep getting updates, or
 pin `ghcr.io/jak/virtual-cups-printer@sha256:…` if you need a fixed image.
+
+## Unraid
+
+[`templates/virtual-cups-printer.xml`](templates/virtual-cups-printer.xml) is an Unraid
+template with the same hardening as the compose examples. Until it is listed in Community
+Applications, add it from the Unraid terminal:
+
+```sh
+wget -O /boot/config/plugins/dockerMan/templates-user/my-virtual-cups-printer.xml \
+  https://raw.githubusercontent.com/jak/virtual-cups-printer/master/templates/virtual-cups-printer.xml
+```
+
+Then **Docker → Add Container → Template: virtual-cups-printer**:
+
+1. Keep **Network Type** on `br0` (or `eth0` when bridging is disabled) and set a **Fixed IP
+   address** outside your router's DHCP range. Unraid runs its own mDNS service, so AirPrint
+   discovery doesn't work on the Host network; on the Bridge network add the printer manually
+   as `ipp://<server-ip>:631/printers/Paperless_Printer` and set *Allowed clients* to `all` or
+   your LAN subnet.
+2. Set an **Admin password**.
+3. Point **Output folder** at where PDFs should go, e.g. paperless-ngx's consume folder.
+   PDFs are owned by `99:100` (`nobody:users`) with mode `0666`, Unraid's share defaults; change
+   PUID/PGID/UMASK to match another consumer.
+
+The spool (queued jobs, job numbers, the printer's UUID and TLS certificate) is kept in
+`/mnt/user/appdata/virtual-cups-printer/spool`. With a custom network the Unraid server
+itself can't reach the printer's IP unless **Settings → Docker → Host access to custom
+networks** is enabled; other devices on the LAN can. `test/unraid.sh` starts the container
+exactly as the template does and prints a test job.
 
 ## Configuration
 
@@ -147,7 +177,7 @@ admin UI, set `PUID`/`PGID`, and stop editing `*.conf` files (use environment va
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Run `test/lint.sh` and `test/smoke.sh`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `test/lint.sh`, `test/smoke.sh` and `test/unraid.sh`.
 [Architecture decisions](docs/adr) are recorded as ADRs.
 
 ## License
