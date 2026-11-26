@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Avahi no longer drops records from legacy unicast mDNS answers (`Record [...] not fitting in
+  legacy unicast packet, dropping`, e.g. for queries from a router's mDNS proxy). The Bonjour
+  TXT record leaves out keys whose default already means "no" (`Bind`, `Collate`, `Copies`,
+  `Punch`, `Scan`, `Sort`, `Staple`), so the whole answer fits in 512 bytes.
+
 ## [2.2.0] – 2026-11-26
 
 ### Added

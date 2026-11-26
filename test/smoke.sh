@@ -263,6 +263,31 @@ check "AVAHI_IPV6=no: the service is still published" grep -q 'successfully esta
 check "AVAHI_IPV6=no: no IPv6 address records, IPv4 only" bash -c \
   "! grep -E 'address record for [0-9a-f:]*:' '$SECRET_FILE.v4' && grep -qE 'address record for [0-9.]+ on eth0' '$SECRET_FILE.v4' &&
    grep -qx 'use-ipv6=no' '$SECRET_FILE.v4' && grep -qx 'publish-aaaa-on-ipv4=no' '$SECRET_FILE.v4'"
+
+# Legacy unicast mDNS (a query from a port other than 5353, as routers' mDNS proxies send): the
+# answer must fit in 512 bytes, or Avahi drops records. Long-ish host name and location on purpose.
+docker run -d --name "$SERVER-v6" --network "$NET" --hostname paperless-printer -e CUPS_ADMIN_PASSWORD=x \
+  -e PRINTER_LOCATION="Office, 2nd floor" "$IMAGE" >/dev/null
+for _ in $(seq 1 30); do
+  docker logs "$SERVER-v6" 2>&1 | grep -q 'successfully established' && break
+  sleep 1
+done
+# Header of the reply to a PTR query for _ipp._tcp.local: 12 bytes, as decimal numbers.
+# shellcheck disable=SC2016 # expanded by the client's bash
+legacy_header=$(client bash -c 'exec 3<>"/dev/udp/$1/5353"
+  printf "\x12\x34\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04_ipp\x04_tcp\x05local\x00\x00\x0c\x00\x01" >&3
+  timeout 5 dd bs=2048 count=1 status=none <&3 | od -An -tu1 -N12' _ "$SERVER-v6" 2>/dev/null || true)
+printf '    reply header: %s\n' "${legacy_header:-<none>}"
+# shellcheck disable=SC2329 # invoked via check
+legacy_reply_complete() {
+  local h
+  read -r -a h <<<"$legacy_header"
+  # 12 header bytes; TC (truncated) bit clear; answers + additional records >= 4.
+  ((${#h[@]} == 12 && (h[2] & 2) == 0 && h[6] * 256 + h[7] + h[10] * 256 + h[11] >= 4))
+}
+check "a legacy unicast query gets PTR, TXT, SRV and A in one untruncated reply" legacy_reply_complete
+check "Avahi drops no records from legacy unicast answers" bash -c "! docker logs '$SERVER-v6' 2>&1 | grep -q 'not fitting'"
+docker rm -f "$SERVER-v6" >/dev/null
 # Run from /etc so a glob like '*.conf' would match files if the list were word-split unquoted.
 docker run --rm -w /etc -e CUPS_ADMIN_PASSWORD=x -e ADVERTISED_HOST=fd00::12 \
   -e CUPS_ALLOW_FROM="$(printf '@LOCAL @IF(eth0)\n[fd00::]/8\n*.conf')" --entrypoint bash "$IMAGE" -c \
