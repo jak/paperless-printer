@@ -140,6 +140,8 @@ jobs:
       - name: Smoke test (hardened + read-only)
         run: IMAGE="${{ needs.build-candidate.outputs.image }}" SERVER_ARGS="$HARDENED_ARGS" test/smoke.sh
       - name: Unraid template (its default settings)
+        # Releases tagged before the template existed (rebuilt weekly) don't have the test.
+        if: hashFiles('test/unraid.sh') != ''
         run: IMAGE="${{ needs.build-candidate.outputs.image }}" test/unraid.sh
 
   scan:
